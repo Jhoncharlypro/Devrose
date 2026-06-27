@@ -106,9 +106,16 @@ Variables clés côté backend:
 - `ALLOWED_HOSTS` — domaines autorisés (CSV)
 - `DATABASE_URL` — optionnel si vous utilisez Postgres
 
-Variables clés côté frontend:
+Variables clés côté frontend (`frontend/.env`):
 - `VITE_API_BASE_URL` — URL de l'API Django (ex: `http://localhost:8000/api`)
-- `VITE_GEMINI_API_KEY` — clé Google Gemini pour le chatbot IA
+- *(aucun secret côté frontend — la clé Gemini reste sur le serveur)*
+
+Variables clés côté backend (`backend/.env`):
+- `SECRET_KEY` — clé secrète Django
+- `DEBUG` — `True` en dev, `False` en prod
+- `ALLOWED_HOSTS` — domaines autorisés (CSV)
+- `GEMINI_API_KEY` — clé Google Gemini utilisée par le proxy IA (jamais exposée au navigateur)
+- `DATABASE_URL` — optionnel si vous utilisez Postgres
 
 > ⚠️ **Important:** ne jamais commit `.env`, `db.sqlite3`, ni les clés secrètes. Tout est déjà exclu via `.gitignore`.
 
@@ -198,7 +205,10 @@ Les contributions sont les bienvenues. Pour proposer un changement:
 
 ## 📄 Licence
 
-© 2026 DevRose Academy. Tous droits réservés.
+Ce projet est sous **licence MIT**. Voir le fichier [`LICENSE`](./LICENSE) à la racine du dépôt pour le texte intégral.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+© 2026 DevRose Academy.
 
 ---
 
