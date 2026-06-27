@@ -1,0 +1,21 @@
+# DevRose Academy — backend dependencies
+# Install with:    pip install -r requirements.txt
+# Regenerate with: pip freeze > requirements.txt   (after activating the venv)
+
+# Web framework
+Django>=5.1,<6.0
+django-cors-headers>=4.3,<5.0
+
+# REST framework + token auth (built-in but pinned for clarity)
+djangorestframework>=3.15,<4.0
+
+# WebSockets / async
+channels>=4.1,<5.0
+daphne>=4.1,<5.0
+
+# Google Gemini (server-side proxy). The key never reaches the React bundle.
+google-generativeai>=0.5,<1.0
+
+# Optional but recommended for production:
+# channels-redis>=4.2   # Redis-backed channel layer (InMemory is the dev default)
+# psycopg2-binary>=2.9  # PostgreSQL driver (we ship SQLite for dev)

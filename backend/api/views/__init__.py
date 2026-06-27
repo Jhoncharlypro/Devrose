@@ -7,3 +7,4 @@ from .live_room import LiveRoomViewSet
 from .favorite import FavoriteViewSet
 from .profile import ProfileViewSet
 from .chat import ChatThreadViewSet, UserListViewSet, ChatSearchViewSet, StoryViewSet
+from .ai import AIGenerateViewSet

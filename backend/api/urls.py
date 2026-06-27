@@ -1,12 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    signup, login, get_profile, 
-    CourseViewSet, EnrollmentViewSet, 
+    signup, login, get_profile,
+    CourseViewSet, EnrollmentViewSet,
     UserProgressViewSet, SessionMemoryViewSet,
     FavoriteViewSet, ProfileViewSet,
     ChatThreadViewSet, UserListViewSet, ChatSearchViewSet, StoryViewSet,
-    LiveRoomViewSet
+    LiveRoomViewSet, AIGenerateViewSet
 )
 
 router = DefaultRouter()
@@ -21,6 +21,7 @@ router.register(r'chat/users', UserListViewSet, basename='chat-users')
 router.register(r'chat/search', ChatSearchViewSet, basename='chat-search')
 router.register(r'chat/stories', StoryViewSet, basename='chat-stories')
 router.register(r'live/rooms', LiveRoomViewSet, basename='live-rooms')
+router.register(r'ai', AIGenerateViewSet, basename='ai')
 
 urlpatterns = [
     path('', include(router.urls)),

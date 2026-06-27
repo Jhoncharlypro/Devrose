@@ -6,6 +6,32 @@ from api.models import ChatThread, Message
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+# ----------------------------------------------------------------------
+# IMPORTANT — these dicts are PROCESS-LOCAL Python state.
+#
+# `online_users`, `typing_users`, `room_connections`, and
+# `room_user_channels` are kept as plain Python dicts inside the ASGI worker
+# process. That has two big consequences:
+#
+#   1. Single-server only: when you scale Daphne across multiple workers /
+#      pods / containers, each process has its own copy of these dicts, so
+#      the chat fabric SPLITS — a user on worker A will not see presence
+#      updates for a user on worker B. Fix: swap the channel layer to
+#      channels-redis and migrate these in-process dicts into shared storage
+#      (or rely purely on group_send() over Redis once the channel-group
+#      fan-out itself goes through Redis).
+#
+#   2. State evaporates on restart: every Daphne reload wipes the dicts. For
+#      soft features (typing indicators, viewer counts) that's fine — clients
+#      reconnect and re-derive state. For hard features ("must know who is
+#      online even after restart") this design is wrong.
+#
+# If you add a feature that needs cluster-wide consistency, do NOT just add
+# another dict here — wire it through the channel_layer instead. The
+# `online_users` and `typing_users` dicts exist for the convenience of NOT
+# round-tripping through Redis on every keystroke; that's a tradeoff for an
+# MVP, not a permanent design choice.
+# ----------------------------------------------------------------------
 online_users = {}  # user_id -> set of channel_names
 typing_users = {}  # thread_id -> {user_id: timestamp}
 room_connections = {}  # room_group_name -> {channel_name: user_info}
@@ -226,19 +252,23 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
 
     async def disconnect(self, close_code):
         self.connected = False
-        if getattr(self, 'room_group_name', None):
-            if self.room_group_name in room_connections:
-                room_connections[self.room_group_name].pop(self.channel_name, None)
-                if not room_connections[self.room_group_name]:
-                    del room_connections[self.room_group_name]
-            if self.room_group_name in room_user_channels and getattr(self, 'user', None) and self.user and self.user.is_authenticated:
-                current_channel = room_user_channels[self.room_group_name].get(self.user.id)
+        # Note: Kot3ChatConsumer never joins a ClassroomLiveConsumer room
+        # (it never sets self.room_group_name), so the room_connections
+        # cleanup below is defensive — only ClassroomLiveConsumer ever populates it.
+        room_group_name = getattr(self, 'room_group_name', None)
+        if room_group_name:
+            if room_group_name in room_connections:
+                room_connections[room_group_name].pop(self.channel_name, None)
+                if not room_connections[room_group_name]:
+                    del room_connections[room_group_name]
+            if room_group_name in room_user_channels and getattr(self, 'user', None) and self.user and self.user.is_authenticated:
+                current_channel = room_user_channels[room_group_name].get(self.user.id)
                 if current_channel == self.channel_name:
-                    room_user_channels[self.room_group_name].pop(self.user.id, None)
-                    if not room_user_channels[self.room_group_name]:
-                        del room_user_channels[self.room_group_name]
+                    room_user_channels[room_group_name].pop(self.user.id, None)
+                    if not room_user_channels[room_group_name]:
+                        del room_user_channels[room_group_name]
             await self.channel_layer.group_send(
-                self.room_group_name,
+                room_group_name,
                 {
                     'type': 'peer_left',
                     'sender_channel_name': self.channel_name

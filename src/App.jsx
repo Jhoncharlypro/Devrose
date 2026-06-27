@@ -1,3 +1,28 @@
+/**
+ * App.jsx — root component for the DevRose Academy frontend.
+ *
+ * Top-level responsibilities (in render order):
+ *   1. Read user / session / progress / favorites from the Django backend
+ *      on mount and re-hydrate them into local state.
+ *   2. Hold the active tab + selected course + theme/font/lang settings
+ *      that drive the entire SPA.
+ *   3. Dispatch toasts and live-fullscreen toggles.
+ *
+ * WHY do we use a manual `activeTab` state machine instead of
+ * `react-router-dom` (already installed)?
+ *   - The app grew shell-by-shell around a single `activeTab` slice early on.
+ *   - Several features rely on cross-tab state that survives navigation:
+ *       • `selectedCourse` carries into CourseDetail;
+ *       • `isLiveFullscreen` is toggled by LiveClassroom and read by Header;
+ *       • `?room=…` deep links into a fullscreen Live Classroom without
+ *         tearing down the active chat socket.
+ *   - Switching to react-router-dom would force re-deriving all of the
+ *     above without functional benefit. Keep manual routing unless we are
+ *     also adding server-side rendering.
+ *
+ * Tab reference: see src/components/Tabs.jsx for the canonical tab ids;
+ * renderContent() below mirrors that list in its switch statement.
+ */
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import Tabs from './components/Tabs';

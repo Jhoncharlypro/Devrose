@@ -1,80 +1,28 @@
+/**
+ * src/components/Kot3Chat.jsx
+ *
+ * Top-level React component for the messenger-style chat panel.
+ *
+ * Module-level constants (palettes, theme registry, ID helpers, story TTL,
+ * WS URL builder) live in `./kot3chat/constants.js`. Synthesized Web Audio
+ * beeps live in `./kot3chat/audioUtils.js`. This file owns all React state,
+ * refs, effects, and the rendered JSX.
+ */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { chatService } from '../services/api';
 import { translations } from '../data/translations';
 import '../styles/kot3chat.css';
-
-// Preset colors for Status creator — FB Messenger inspired palette
-const STATUS_PALETTE = [
-  'linear-gradient(135deg, #ff8a00 0%, #e52e71 100%)',
-  'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-  'linear-gradient(135deg, #5ee7df 0%, #b490ca 100%)',
-  'linear-gradient(135deg, #f6d365 0%, #fda085 100%)',
-  'linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%)',
-  'linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%)',
-  'linear-gradient(135deg, #a8ff78 0%, #78ffd6 100%)',
-  'linear-gradient(135deg, #434343 0%, #000000 100%)',
-  'linear-gradient(135deg, #ff6a00 0%, #ee0979 100%)',
-  'linear-gradient(135deg, #00c6ff 0%, #0072ff 100%)',
-  'linear-gradient(135deg, #fdc830 0%, #f37335 100%)',
-  'linear-gradient(135deg, #184e68 0%, #57ca85 100%)',
-  '#0f172a', '#7c2d12', '#831843', '#1e3a8a', '#14532d', '#581c87'
-];
-
-const STATUS_FONTS = [
-  { key: 'modern',  family: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' },
-  { key: 'bold',    family: 'Impact, "Arial Black", sans-serif' },
-  { key: 'playful', family: '"Comic Sans MS", "Brush Script MT", cursive' }
-];
-
-// Backwards-compat alias used in legacy code paths
-const GRADIENS = STATUS_PALETTE;
-
-// Theme registry — matches :root[data-theme="..."] CSS blocks in kot3chat.css
-// Each theme: id, label, emoji, accent (primary), bg (preview-bar background), isLight (for picker chevron color)
-const THEMES = [
-  { id: 'dark',            label: 'DevRose Dark',     emoji: '🌙', accent: '#e91e63', bg: 'linear-gradient(135deg,#1e1e2f 0%,#12131a 50%,#e91e63 100%)', isLight: false },
-  { id: 'messenger-light', label: 'Messenger Light',  emoji: '☀️', accent: '#0084ff', bg: 'linear-gradient(135deg,#ffffff 0%,#f0f2f5 50%,#0084ff 100%)', isLight: true  },
-  { id: 'messenger-dark',  label: 'Messenger Dark',   emoji: '🌑', accent: '#0084ff', bg: 'linear-gradient(135deg,#242526 0%,#18191a 50%,#0084ff 100%)', isLight: false },
-  { id: 'rose',            label: 'Rose',             emoji: '🌹', accent: '#ff4d6d', bg: 'linear-gradient(135deg,#2b161c 0%,#1a0f12 50%,#ff4d6d 100%)', isLight: false },
-  { id: 'sunset',          label: 'Sunset',           emoji: '🌅', accent: '#ff8a00', bg: 'linear-gradient(135deg,#2d2117 0%,#1c1510 50%,#ff8a00 100%)', isLight: false },
-  { id: 'forest',          label: 'Forest',           emoji: '🌲', accent: '#00b862', bg: 'linear-gradient(135deg,#192e22 0%,#0f1a14 50%,#00b862 100%)', isLight: false },
-  { id: 'ocean',           label: 'Ocean',            emoji: '🌊', accent: '#00d4ff', bg: 'linear-gradient(135deg,#142436 0%,#09121a 50%,#00d4ff 100%)', isLight: false },
-  { id: 'dusk',            label: 'Dusk Lavender',    emoji: '🌌', accent: '#b366ff', bg: 'linear-gradient(135deg,#201a30 0%,#13101c 50%,#b366ff 100%)', isLight: false },
-];
-const THEME_BY_ID = Object.fromEntries(THEMES.map(t => [t.id, t]));
-const LEGACY_THEME_KEY = 'kot3_dark_mode';
-const ACTIVE_THEME_KEY = 'kot3_active_theme';
-
-const resolveInitialTheme = () => {
-  try {
-    // Migrate legacy 'kot3_dark_mode=false' once and clean up.
-    const legacy = localStorage.getItem(LEGACY_THEME_KEY);
-    if (legacy === 'false') {
-      try { localStorage.removeItem(LEGACY_THEME_KEY); } catch {}
-      try { localStorage.setItem(ACTIVE_THEME_KEY, 'messenger-light'); } catch {}
-      return 'messenger-light';
-    }
-    const saved = localStorage.getItem(ACTIVE_THEME_KEY);
-    if (saved && THEME_BY_ID[saved]) return saved;
-  } catch {}
-  return 'dark';
-};
-
-// Set documentElement data-theme synchronously at module-evaluation time so the
-// very first paint already has the correct theme (no flash of wrong theme).
-if (typeof document !== 'undefined') {
-  try { document.documentElement.setAttribute('data-theme', resolveInitialTheme()); } catch {}
-}
-
-const sameId = (left, right) => String(left) === String(right);
-const isTempId = (id) => typeof id === 'string' && id.startsWith('tmp-');
-const STORY_TTL_MS = 24 * 60 * 60 * 1000;
-const buildChatSocketUrl = (token) => {
-  const loc = window.location;
-  const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.KOT3_WS_HOST || loc.host;
-  return `${protocol}//${host}/ws/chat/?token=${encodeURIComponent(token)}`;
-};
+import {
+  STATUS_PALETTE, STATUS_FONTS, GRADIENS,
+  THEMES, THEME_BY_ID, ACTIVE_THEME_KEY,
+  resolveInitialTheme,
+  sameId, isTempId, STORY_TTL_MS,
+  buildChatSocketUrl,
+} from './kot3chat/constants';
+import {
+  playSendBeep, playReceiveBeep, playConnectedChime,
+  startCallingSounds, stopCallingSounds,
+} from './kot3chat/audioUtils';
 
 const Kot3Chat = ({ lang, user, showToast }) => {
   // --- CORE CHAT STATES (from original Kot3Chat.jsx) ---
@@ -247,10 +195,9 @@ const Kot3Chat = ({ lang, user, showToast }) => {
   const joinSentRef = useRef({});
   const reconnectAttemptRef = useRef(0);
 
-  // Audio Context Ref for synthetic tones
-  const callAudioCtxRef = useRef(null);
-  const callOscillatorsRef = useRef([]);
-  const callGainNodeRef = useRef(null);
+  // Audio context + oscillators live in ./kot3chat/audioUtils.js (module-scoped).
+  // The remaining audio refs hold timer IDs returned from setInterval/setTimeout
+  // — React refs survive across renders so we can clear them in a useEffect cleanup.
   const callDurationTimerRef = useRef(null);
   const callRingingTimeoutRef = useRef(null);
   const statusViewerTimerRef = useRef(null);
@@ -440,137 +387,11 @@ const Kot3Chat = ({ lang, user, showToast }) => {
     return () => el.removeEventListener('scroll', handleScroll);
   }, [activeThread]);
 
-  // --- SOUND EFFECTS (Web Audio API Synthesized) ---
-  const playSendBeep = () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(450, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(900, ctx.currentTime + 0.12);
-      gain.gain.setValueAtTime(0.1, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.12);
-    } catch {}
-  };
-
-  const playReceiveBeep = () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc1 = ctx.createOscillator();
-      const gain1 = ctx.createGain();
-      osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(650, ctx.currentTime);
-      gain1.gain.setValueAtTime(0.08, ctx.currentTime);
-      gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
-      osc1.connect(gain1);
-      gain1.connect(ctx.destination);
-      osc1.start();
-      osc1.stop(ctx.currentTime + 0.15);
-
-      setTimeout(() => {
-        const osc2 = ctx.createOscillator();
-        const gain2 = ctx.createGain();
-        osc2.type = 'sine';
-        osc2.frequency.setValueAtTime(850, ctx.currentTime);
-        gain2.gain.setValueAtTime(0.08, ctx.currentTime);
-        gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
-        osc2.connect(gain2);
-        gain2.connect(ctx.destination);
-        osc2.start();
-        osc2.stop(ctx.currentTime + 0.2);
-      }, 75);
-    } catch {}
-  };
-
-  const startCallingSounds = () => {
-    try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioContext();
-      callAudioCtxRef.current = ctx;
-
-      const osc1 = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(440, ctx.currentTime);
-      osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(480, ctx.currentTime);
-
-      gain.gain.setValueAtTime(0, ctx.currentTime);
-
-      osc1.connect(gain);
-      osc2.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc1.start();
-      osc2.start();
-
-      callOscillatorsRef.current = [osc1, osc2];
-      callGainNodeRef.current = gain;
-
-      // Cadence: 1.5s on, 3s off
-      const playRing = () => {
-        if (!callGainNodeRef.current || ctx.state === 'closed') return;
-        gain.gain.cancelScheduledValues(ctx.currentTime);
-        gain.gain.setValueAtTime(0, ctx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.06, ctx.currentTime + 0.1);
-        setTimeout(() => {
-          if (callGainNodeRef.current) {
-            gain.gain.cancelScheduledValues(ctx.currentTime);
-            gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
-          }
-        }, 1500);
-      };
-
-      playRing();
-      const ringInterval = setInterval(playRing, 4500);
-      callOscillatorsRef.current.push({ interval: ringInterval });
-    } catch (e) {
-      console.warn("Failed to generate dialing tone", e);
-    }
-  };
-
-  const stopCallingSounds = () => {
-    try {
-      if (callOscillatorsRef.current) {
-        callOscillatorsRef.current.forEach(item => {
-          if (item?.interval) clearInterval(item.interval);
-          else if (typeof item?.stop === 'function') item.stop();
-        });
-        callOscillatorsRef.current = [];
-      }
-      if (callGainNodeRef.current) {
-        callGainNodeRef.current = null;
-      }
-      if (callAudioCtxRef.current) {
-        callAudioCtxRef.current.close();
-        callAudioCtxRef.current = null;
-      }
-    } catch {}
-  };
-
-  const playConnectedChime = () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(600, ctx.currentTime);
-      osc.frequency.setValueAtTime(800, ctx.currentTime + 0.08);
-      gain.gain.setValueAtTime(0.06, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.2);
-    } catch {}
-  };
+  // --- SOUND EFFECTS ---
+  // playSendBeep / playReceiveBeep / playConnectedChime / startCallingSounds /
+  // stopCallingSounds are imported from ./kot3chat/audioUtils.js. The audio
+  // module manages its own AudioContext + oscillator state at module scope
+  // (no React refs needed).
 
   // --- API DATA LOADS ---
   const loadThreads = async () => {

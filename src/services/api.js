@@ -9,7 +9,15 @@ const api = axios.create({
   },
 });
 
-// Add interceptor for Token
+// Add interceptor for Token.
+//
+// WHY localStorage and not a React context / global store here?
+// axios interceptors run OUTSIDE React's render lifecycle. If we read the token
+// from a React context, we'd have to re-register the interceptor on every user
+// state change — and many in-flight requests would race the re-registration and
+// ship stale or empty auth headers. localStorage is sync, fast, persistent
+// across reloads, and updated exactly when login/logout happen, which is the
+// perfect simple contract for outbound HTTP auth.
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
   if (token) {
@@ -76,6 +84,13 @@ export const liveRoomService = {
   resolve: (data) => api.post('live/rooms/resolve/', data),
   sync: (data) => api.post('live/rooms/sync/', data),
   updateState: (roomId, data) => api.patch(`live/rooms/${encodeURIComponent(roomId)}/state/`, data),
+};
+
+// AI proxy: backend holds the Gemini API key, frontend just forwards prompts.
+// See backend/api/views/ai.py for the server-side endpoint.
+export const aiService = {
+  generate: ({ prompt, system_instruction, model } = {}) =>
+    api.post('ai/generate/', { prompt, system_instruction, model }),
 };
 
 export default api;

@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { liveRoomService } from '../services/api';
+import { aiService, liveRoomService } from '../services/api';
 
-const API_KEY = "AIzaSyBzgDV8VbvpdRtFaJkWgBJ6nqsU0HlN_gQ";
-const genAI = new GoogleGenerativeAI(API_KEY);
+// AI calls are proxied through the Django backend (aiService). The Gemini API
+// key never leaves the server. See backend/api/views/ai.py + backend/.env
+// (GEMINI_API_KEY). If the server isn't configured, aiService.generate() returns
+// 501 and the AI helpers catch it with a user-friendly toast.
+
 
 const LiveClassroom = ({ lang, translations, user, showToast, onActiveRoomChange }) => {
   const t = translations[lang] || translations['ht'];
@@ -1261,14 +1263,12 @@ const themePalette = {
     Respond in Haitian Creole (lang: 'ht') if the student asks in Creole, otherwise match their language.`;
 
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent([
-        { text: context },
-        { text: `Current chat messages for context: ${JSON.stringify(chatMessages)}` },
-        { text: `Question: ${aiQuestion}` }
-      ]);
-      const response = await result.response;
-      setAiAnswer(response.text());
+      const res = await aiService.generate({
+        prompt: `Current chat messages for context: ${JSON.stringify(chatMessages)}\n\nQuestion: ${aiQuestion}`,
+        system_instruction: context,
+        model: 'gemini-1.5-flash',
+      });
+      setAiAnswer(res.data.text);
     } catch (err) {
       console.error(err);
       setAiAnswer(lang === 'ht' ? "Erè nan koneksyon ak AI." : "Error communicating with AI.");
@@ -1288,13 +1288,12 @@ const themePalette = {
     Respond in ${lang === 'ht' ? 'Haitian Creole' : 'English'}.`;
 
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent([
-        { text: context },
-        { text: `Chat log: ${JSON.stringify(chatMessages)}` }
-      ]);
-      const response = await result.response;
-      setAiSummary(response.text());
+      const res = await aiService.generate({
+        prompt: `Chat log: ${JSON.stringify(chatMessages)}`,
+        system_instruction: context,
+        model: 'gemini-1.5-flash',
+      });
+      setAiSummary(res.data.text);
     } catch (err) {
       console.error(err);
       setAiSummary(lang === 'ht' ? "Erè nan jenerasyon rezime a." : "Error generating summary.");
@@ -1321,10 +1320,12 @@ const themePalette = {
     Language: ${lang === 'ht' ? 'Haitian Creole' : 'English'}.`;
 
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text().trim();
+      const res = await aiService.generate({
+        prompt,
+        system_instruction: context,
+        model: 'gemini-1.5-flash',
+      });
+      const text = (res.data.text || '').trim();
       
       const cleanedJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
       const parsed = JSON.parse(cleanedJson);

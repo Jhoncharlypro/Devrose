@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { aiService } from '../services/api';
 
 const Chatbot = ({ lang, translations }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -12,9 +12,10 @@ const Chatbot = ({ lang, translations }) => {
   const [isThinking, setIsThinking] = useState(false);
   const msgsEndRef = useRef(null);
 
-  // Note: For production, use environment variables for keys.
-  const API_KEY = "AIzaSyBzgDV8VbvpdRtFaJkWgBJ6nqsU0HlN_gQ"; 
-  const genAI = new GoogleGenerativeAI(API_KEY);
+  // AI calls are proxied through the Django backend (apiService.ai). The Gemini
+  // API key never leaves the server, so there's nothing secret to configure here.
+  // See backend/api/views/ai.py + backend/.env (GEMINI_API_KEY).
+
 
   useEffect(() => {
     setMessages([{ role: 'bot', text: t.bot_welcome || 'Bonjou! Mwen se DevRose AI.' }]);
@@ -44,18 +45,15 @@ const Chatbot = ({ lang, translations }) => {
     Respond primarily in ${lang === 'ht' ? 'Haitian Creole' : (lang === 'fr' ? 'French' : (lang === 'es' ? 'Spanish' : 'English'))}. Use Markdown formatting.`;
 
     try {
-      const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash",
-        systemInstruction: context 
+      const res = await aiService.generate({
+        prompt: userMsg,
+        system_instruction: context,
+        model: 'gemini-1.5-flash',
       });
-
-      const result = await model.generateContent(userMsg);
-      const response = await result.response;
-      const text = response.text();
-
+      const text = (res.data && res.data.text) || '';
       setMessages(prev => [...prev, { role: 'bot', text: text }]);
     } catch (error) {
-      console.error("Gemini Error:", error);
+      console.error('AI Proxy Error:', error);
       setMessages(prev => [...prev, { role: 'bot', text: lang === 'ht' ? "Mwen regrèt, gen yon erè ki fèt." : "Sorry, an error occurred." }]);
     } finally {
       setIsThinking(false);
