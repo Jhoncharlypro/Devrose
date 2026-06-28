@@ -181,7 +181,13 @@ DEBUG = _USE_POSTGRES and (
 if _USE_POSTGRES:
     _RAW_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').strip()
     _PARSED = [h.strip() for h in _RAW_HOSTS.split(',') if h.strip()]
-    ALLOWED_HOSTS = _PARSED if _PARSED else ['localhost', '127.0.0.1']
+    if not _PARSED:
+        _RENDER_HOST = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
+        if _RENDER_HOST:
+            _PARSED = [_RENDER_HOST, 'localhost', '127.0.0.1']
+        else:
+            _PARSED = ['localhost', '127.0.0.1']
+    ALLOWED_HOSTS = _PARSED
 else:
     ALLOWED_HOSTS = ['*']
 
