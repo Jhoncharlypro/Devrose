@@ -217,7 +217,19 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
+# Production: only allow our Render frontend. Keep as a list so the
+# middleware can match exact scheme+host+port. Fall back to permissive
+# when the env var is missing (local dev / CI without CORS_ALLOWED_ORIGINS).
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
+    if origin.strip()
+] or [
+    'http://localhost:3000',
+    'http://localhost:8000',
+    'https://devrose.onrender.com',
+    'https://api-devrose.onrender.com',
+]
 
 # ``X-Authorization`` is shipped alongside ``Authorization`` by the FE
 # axios interceptor (see src/services/api.js) so the preflight must
