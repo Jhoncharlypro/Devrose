@@ -1721,17 +1721,6 @@ body, .kot3-container, .kot3-sidebar, .kot3-chat-window {
   40% { transform: translateY(-5px); }
 }
 
-/* Chat Input Footer styling */
-  background-color: rgba(255,255,255,0.05);
-}
-
-/* FULLSCREEN STORIES SLIDESHOW VIEWER */
-  padding: 8px 14px;
-  color: white;
-  font-size: 13px;
-  outline: none;
-}
-
 .kot3-status-reply-send {
   background-color: var(--primary-color);
   color: white;
@@ -1743,11 +1732,6 @@ body, .kot3-container, .kot3-sidebar, .kot3-chat-window {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-}
-
-/* STATUS CREATOR DIALOG OVERLAY */
-  background-color: var(--primary-color);
-  color: white;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -2214,10 +2198,6 @@ body, .kot3-container, .kot3-sidebar, .kot3-chat-window {
   color: #00c8ff;
 }
 
-/* ===== Context banner (reply/edit) above input ===== */
-  background: linear-gradient(135deg, var(--primary-color), #00c8ff);
-}
-
 /* ===== Scroll-to-bottom FAB ===== */
 .kot3-scroll-fab {
   position: absolute;
@@ -2254,11 +2234,6 @@ body, .kot3-container, .kot3-sidebar, .kot3-chat-window {
   background: var(--border-color);
   margin: 6px 4px;
   border-radius: 1px;
-}
-
-/* ===== Theme picker inside kot3-top-settings-menu ===== */
-  outline: 2px solid var(--primary-color);
-  outline-offset: 2px;
 }
 
 /* On wider screens, give the grid a single column to fit menu width */
@@ -2366,17 +2341,7 @@ body, .kot3-container, .kot3-sidebar, .kot3-chat-window {
   100% { transform: scaleY(1.5); }
 }
 
-/* ===== Status creator photo preview (replaces textarea when image is set) ===== */
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-  margin: auto;
-  background-color: #000;
-  user-select: none;
-  -webkit-user-drag: none;
-}
+/* (Status creator photo preview styles moved to src/components/kot3chat/stories-modal.css) */
 
 /* ===== Messenger-style search bar polish (pill + clear + cancel) ===== */
 .kot3-search-wrapper {

@@ -114,6 +114,9 @@
 }
 
 .kot3-emoji-picker span:hover {
+  background-color: rgba(var(--primary-rgb), 0.10);
+  transform: scale(1.15);
+}
 .kot3-context-banner {
   margin: 0 14px 8px;
   padding: 10px 14px;
@@ -300,3 +303,6 @@
   background: linear-gradient(135deg, #00c8ff, var(--primary-color));
 }
 .kot3-send-btn-edit:hover {
+  background: linear-gradient(135deg, #00a8d4, var(--primary-color));
+  transform: scale(1.05);
+}

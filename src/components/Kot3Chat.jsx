@@ -9,7 +9,7 @@
  * refs, effects, and the rendered JSX.
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { chatService } from '../services/api';
+import api, { chatService } from '../services/api';
 import { translations } from '../data/translations';
 import '../styles/kot3chat.css';
 import {
@@ -629,8 +629,7 @@ const Kot3Chat = ({ lang, user, showToast }) => {
         return;
       }
       try {
-        const axiosClient = (await import('../services/api')).default;
-        const { data } = await axiosClient.post('refresh/', { refresh });
+        const { data } = await api.post('refresh/', { refresh });
         if (data?.access) {
           localStorage.setItem('access_token', data.access);
           if (data?.refresh) localStorage.setItem('refresh_token', data.refresh);

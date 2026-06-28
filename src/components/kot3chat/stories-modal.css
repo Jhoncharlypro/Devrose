@@ -204,6 +204,14 @@ overflow: hidden;
   background-color: rgba(255,255,255,0.15);
   border: 1px solid rgba(255,255,255,0.2);
   border-radius: 18px;
+  padding: 8px 14px;
+  color: white;
+  font-size: 13px;
+  outline: none;
+}
+.kot3-status-reply-input::placeholder {
+  color: rgba(255,255,255,0.6);
+}
 .kot3-creator-modal {
   position: fixed;
   top: 0;
@@ -328,6 +336,13 @@ overflow: hidden;
 }
 
 .kot3-creator-actions .btn-publish {
+  background-color: var(--primary-color);
+  color: white;
+}
+.kot3-creator-actions .btn-publish:hover {
+  background-color: rgba(var(--primary-rgb), 0.85);
+  transform: scale(1.02);
+}
 .kot3-preview-photo-wrap {
   position: relative;
   width: 100%;
@@ -391,4 +406,3 @@ overflow: hidden;
   background-color: transparent;
 }
 
-.kot3-status-media {

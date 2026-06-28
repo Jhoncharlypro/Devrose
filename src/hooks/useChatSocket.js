@@ -54,7 +54,7 @@
  *   reset()                              — wipe all in-memory presence rows
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { chatService } from '../services/api';
+import api, { chatService } from '../services/api';
 import { buildChatSocketUrl, sameId, isTempId } from '../components/kot3chat/constants';
 import {
   playSendBeep,
@@ -173,8 +173,7 @@ export function useChatSocket(opts) {
       return;
     }
     try {
-      const axios = (await import('../services/api')).default;
-      const { data } = await axios.post('refresh/', { refresh });
+      const { data } = await api.post('refresh/', { refresh });
       if (data?.access) {
         localStorage.setItem('access_token', data.access);
         if (data?.refresh) localStorage.setItem('refresh_token', data.refresh);
