@@ -362,6 +362,25 @@ const Kot3Chat = ({ lang, user, showToast }) => {
     };
   }, []);
 
+  // Forced logout (from axios interceptor after refresh-token rejection, or
+  // manual user click elsewhere). Tear down the WebSocket so we don't keep
+  // burning server-side presence/typing slots while the user is signed out.
+  // (Follow-up to Reviewer MAJOR#5: WS teardown on forced logout.)
+  useEffect(() => {
+    const handleForcedLogout = () => {
+      try {
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+          wsRef.current.close(1000, 'Forced logout');
+        }
+      } catch { /* ignore */ }
+      wsReadyRef.current = false;
+      setWsConnected(false);
+      wsRef.current = null;
+    };
+    window.addEventListener('devrose:auth:logout', handleForcedLogout);
+    return () => window.removeEventListener('devrose:auth:logout', handleForcedLogout);
+  }, []);
+
   // Scroll logic for chat pane
   const scrollToBottom = useCallback(() => {
     if (messagesEndRef.current) {
@@ -583,7 +602,8 @@ const Kot3Chat = ({ lang, user, showToast }) => {
   const connectWS = useCallback(() => {
     if (!user) return;
     clearTimeout(reconnectTimerRef.current);
-    const token = localStorage.getItem('token');
+    // Read from new JWT key, fall back to legacy DRF Token key during migration.
+    const token = localStorage.getItem('access_token') || localStorage.getItem('token');
     if (!token) return;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -592,6 +612,40 @@ const Kot3Chat = ({ lang, user, showToast }) => {
     
     console.log("Connecting WS to url:", url);
     const socket = new WebSocket(url);
+
+    // Helper for the 4401 reconnect ladder. Declared WITH the `const`
+    // keyword and BEFORE any caller so we (a) don't trigger a
+    // ReferenceError in ESM strict mode (Vite is strict by default) via
+    // bare-assignment, and (b) so the onclose handler can call it without
+    // racing the temporal dead zone.
+    //
+    // The function RECURSIVELY calls `connectWS()` — that's fine because we
+    // are inside the same closure and edit each render via `useCallback`.
+    const tryRefreshThenReconnect = async () => {
+      const refresh = localStorage.getItem('refresh_token');
+      if (!refresh) {
+        // No refresh left → force logout so the rest of the app can clear state.
+        try { window.dispatchEvent(new CustomEvent('devrose:auth:logout')); } catch {}
+        return;
+      }
+      try {
+        const axiosClient = (await import('../services/api')).default;
+        const { data } = await axiosClient.post('refresh/', { refresh });
+        if (data?.access) {
+          localStorage.setItem('access_token', data.access);
+          if (data?.refresh) localStorage.setItem('refresh_token', data.refresh);
+          reconnectAttemptRef.current = 0;
+          connectWS();
+          return;
+        }
+      } catch (err) {
+        console.warn('Kot3Chat WS: refresh failed after 4401', err);
+      }
+      // Refresh failed — propagate forced logout. We intentionally do NOT
+      // auto-reconnect: without a valid token the consumer would close us
+      // with 4401 again in a tight loop.
+      try { window.dispatchEvent(new CustomEvent('devrose:auth:logout')); } catch {}
+    };
 
     socket.onopen = () => {
       console.log('Kot3Chat WS connected successfully');
@@ -610,6 +664,14 @@ const Kot3Chat = ({ lang, user, showToast }) => {
       setWsConnected(false);
       wsRef.current = null;
       if (user && e.code !== 1000) {
+        // JWT-specific: the server closes with 4401 when the access token
+        // is missing/expired (see api/middleware.py + api/consumers.py).
+        // In that case we don't just back-off and retry — the old token is
+        // dead. We need to refresh it first, then reconnect with the new one.
+        if (e.code === 4401) {
+          tryRefreshThenReconnect();
+          return;
+        }
         reconnectAttemptRef.current += 1;
         const delay = Math.min(1000 * Math.pow(2, reconnectAttemptRef.current - 1), 15000);
         reconnectTimerRef.current = setTimeout(connectWS, delay);
@@ -1866,15 +1928,21 @@ const Kot3Chat = ({ lang, user, showToast }) => {
               </div>
             </div>
           )}
-          <div className="kot3-stories-title-row">
-            <span>{lang === 'ht' ? 'Status' : 'Stories'}</span>
-            <button type="button" onClick={() => setIsEditingStatus(true)}>
-              <i className="fas fa-plus"></i>
-              <span>{lang === 'ht' ? 'Ajoute pa w' : 'Add yours'}</span>
-            </button>
-          </div>
-          <div className="kot3-stories-quick-row">
-            {storiesHtml}
+          <div className="kot3-stories-shell">
+            <div className="kot3-stories-shell-header">
+              <span className="kot3-stories-shell-title">{lang === 'ht' ? 'Estati' : 'Stories'}</span>
+              <button
+                type="button"
+                className="kot3-stories-shell-add"
+                onClick={() => setIsEditingStatus(true)}
+              >
+                <i className="fas fa-plus"></i>
+                <span>{lang === 'ht' ? 'Ajoute pa w' : 'Add yours'}</span>
+              </button>
+            </div>
+            <div className="kot3-stories-quick-row">
+              {storiesHtml}
+            </div>
           </div>
           <div className="kot3-tab-content">
             {filteredThreads.length === 0 ? (
@@ -2230,15 +2298,36 @@ const Kot3Chat = ({ lang, user, showToast }) => {
               <div className="kot3-header-actions"></div>
           </div>
 
-          <div className="kot3-search-wrapper">
-            <i className="fas fa-search"></i>
+          <div className={`kot3-search-wrapper ${localSearch ? 'has-text' : ''}`}>
+            <i className="fas fa-search kot3-search-leading-icon"></i>
             <input
               type="text"
               value={localSearch}
               onChange={(e) => setLocalSearch(e.target.value)}
-              placeholder={lang === 'ht' ? 'Chache moun oswa status...' : 'Search people or status...'}
+              placeholder={lang === 'ht' ? 'Chache moun oswa chat...' : 'Search on Messenger…'}
               className="kot3-search-input"
+              aria-label={lang === 'ht' ? 'Chache' : 'Search'}
             />
+            {localSearch && (
+              <>
+                <button
+                  type="button"
+                  className="kot3-search-clear"
+                  onClick={() => setLocalSearch('')}
+                  title={lang === 'ht' ? 'Efase rechèch la' : 'Clear search'}
+                  aria-label={lang === 'ht' ? 'Efase rechèch la' : 'Clear search'}
+                >
+                  <i className="fas fa-circle-xmark"></i>
+                </button>
+                <button
+                  type="button"
+                  className="kot3-search-cancel"
+                  onClick={() => { setLocalSearch(''); setSearch(''); }}
+                >
+                  {lang === 'ht' ? 'Anile' : 'Cancel'}
+                </button>
+              </>
+            )}
           </div>
         </div>
 

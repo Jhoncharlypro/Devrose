@@ -6,16 +6,37 @@
 Django>=5.1,<6.0
 django-cors-headers>=4.3,<5.0
 
-# REST framework + token auth (built-in but pinned for clarity)
+# REST framework + JWT auth
 djangorestframework>=3.15,<4.0
+djangorestframework-simplejwt>=5.3,<6.0  # JWT access + refresh + blacklist (replaces built-in DRF Token)
 
 # WebSockets / async
 channels>=4.1,<5.0
 daphne>=4.1,<5.0
 
+# channels-redis — Redis-backed channel layer + Group fan-out. Required
+# when scale-out matters: ``InMemoryChannelLayer`` keeps ``chat_*`` groups,
+# typing dicts, presence, and viewers in PROCESS-LOCAL memory, which
+# means Daphne can run at most ONE worker before the chat fabric splits
+# (a user on Worker A doesn't see a user on Worker B). Set ``REDIS_URL``
+# in production to opt in. Channels-redis 4.2.x is the LTS line that
+# works with channels>=4.1,<5.0 — verified against channels 4.3.
+channels-redis>=4.2,<5.0
+# redis — the underlying client. ``channels-redis`` pulls this in transitively
+# but pinning here makes the version explicit so the sync client used by
+# ``api/presence.py`` (DRF views) and the asyncio client (consumers) agree
+# on protocol version.
+redis>=5.0,<6.0
+
 # Google Gemini (server-side proxy). The key never reaches the React bundle.
 google-generativeai>=0.5,<1.0
 
-# Optional but recommended for production:
-# channels-redis>=4.2   # Redis-backed channel layer (InMemory is the dev default)
-# psycopg2-binary>=2.9  # PostgreSQL driver (we ship SQLite for dev)
+# ─── Database drivers ────────────────────────────────────────────────────
+# psycopg2-binary — synchronously used by Django ORM. Binary wheel means no
+# libpq build step on macOS / Windows. Works fine with Daphne because every
+# ORM call goes through sync_to_async.
+psycopg2-binary>=2.9,<3.0
+# dj-database-url — parses $DATABASE_URL (Supabase, Heroku, Neon, Render)
+# into a DATABASES['default'] dict. Robust against weird characters in
+# Supabase-generated passwords ('#', '@', '%', quoted spaces).
+dj-database-url>=3.1,<4.0

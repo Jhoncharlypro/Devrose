@@ -1,0 +1,154 @@
+/*
+ * src/components/kot3chat/theme-settings-menu.css
+ *
+ * Extracted from src/styles/kot3chat.css (lines ~2878-2975).
+ * Per-module stylesheet for ThemeSettingsMenu.jsx. The component imports
+ * this file at module top so the styles travel with the JSX that owns the
+ * classNames. The host menu (top-bar settings dropdown) still relies on
+ * these classes for its other items; we DO NOT rename any classHere.
+ */
+.kot3-theme-section-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.kot3-theme-section-label i {
+  font-size: 11px;
+  color: var(--primary-color);
+}
+
+.kot3-theme-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 2px 4px 6px;
+}
+
+.kot3-theme-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.18s;
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.kot3-theme-chip:hover {
+  border-color: var(--primary-color);
+  background: rgba(var(--primary-rgb), 0.08);
+  transform: translateY(-1px);
+}
+
+.kot3-theme-chip.active {
+  border-color: var(--primary-color);
+  background: rgba(var(--primary-rgb), 0.16);
+  box-shadow: 0 0 0 1px var(--primary-color) inset, 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.kot3-theme-emoji {
+  font-size: 14px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.kot3-theme-dot {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+
+.kot3-theme-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.kot3-theme-swatch {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  position: relative;
+}
+
+.kot3-theme-check {
+  flex-shrink: 0;
+  color: var(--primary-color);
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+.kot3-theme-grid:focus-within .kot3-theme-chip {
+  outline: none;
+}
+.kot3-theme-chip:focus-visible {
+  outline: 2px solid var(--primary-color, #e91e63);
+  outline-offset: 2px;
+}
+
+/* ===== Section divider between chip grid and CustomThemeEditor ===== */
+.kot3-theme-section-divider { height: 1px; border: 0; background: var(--border-color); margin: 4px 10px 6px; opacity: 0.6; }
+
+/* ===== Custom accent preset dot (used in CustomThemeEditor) ===== */
+.kot3-theme-custom-dot { transition: transform 0.15s, box-shadow 0.15s; }
+.kot3-theme-custom-dot:hover { transform: scale(1.10); box-shadow: 0 2px 6px rgba(0,0,0,0.45); }
+.kot3-theme-custom-dot:focus-visible { outline: 2px solid var(--primary-color, #e91e63); outline-offset: 2px; }
+.kot3-theme-custom-dot.active { box-shadow: 0 0 0 1px var(--text-primary) inset, 0 4px 12px rgba(0,0,0,0.3); }
+
+/*
+ * Wrapper for the standalone theme picker (class renamed from
+ * `kot3-theme-section-label-only` to avoid bleeding styles into the
+ * host menu's nested form — see review nit). (the variant used
+ * when the picker is rendered outside the larger top-settings-menu
+ * dropdown — e.g. the classroom's "enter live" area). The class
+ * `-only` suffix denotes this standalone form. Without these rules the
+ * picker rendered as an unstyled div and broke the top bar's flex
+ * layout (deforming sibling elements). The bounded max-width +
+ * display: inline-flex + vertical orientation give it a self-contained
+ * "card" shape that the surrounding top bar can lay out cleanly.
+ */
+.kot3-theme-picker-standalone {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  margin: 0;
+  min-width: 240px;
+  max-width: 320px;
+  background: var(--bg-secondary, rgba(20, 21, 31, 0.96));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.10));
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  /* Keep our own font rhythm — don't let the top bar's font-size
+     cascade stretch the chip labels. */
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--text-primary);
+  /* Sit comfortably without absolute positioning — the parent layout
+     decides where to place us; we just refuse to deform them. */
+  flex-shrink: 0;
+  align-self: flex-start;
+}

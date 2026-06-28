@@ -23,7 +23,7 @@
  * Tab reference: see src/components/Tabs.jsx for the canonical tab ids;
  * renderContent() below mirrors that list in its switch statement.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import Tabs from './components/Tabs';
 import SearchBar from './components/SearchBar';
@@ -46,7 +46,8 @@ import ClassroomView from './components/ClassroomView';
 import LiveClassroom from './components/LiveClassroom';
 import Kot3Chat from './components/Kot3Chat';
 import { translations } from './data/translations';
-import { courseService, authService, sessionService, progressService, profileService, favoriteService, chatService } from './services/api';
+import { courseService, authService, sessionService, progressService, profileService, favoriteService, chatService, clearTokenPair, broadcastLogout, isSupabaseSessionActive } from './services/api';
+import { getSupabase, getSupabaseSession, isSupabaseConfigured } from './services/supabase';
 
 function shuffleArray(array) {
   const arr = [...array];
@@ -76,6 +77,12 @@ function App() {
   const [isLiveFullscreen, setIsLiveFullscreen] = useState(() => {
     return Boolean(new URLSearchParams(window.location.search).get('room'));
   });
+  // ``suppressNextSignOutBroadcast`` is set to ``true`` for one SB
+  // ``SIGNED_OUT`` cycle when WE initiated the logout (see handleLogout
+  // — wraps ``await sb.auth.signOut()`` in a try/finally). It prevents
+  // the SB subscription below from firing a second toast AFTER
+  // handleLogout already showed the right copy.
+  const suppressNextSignOutBroadcast = useRef(false);
 
   const toggleTheme = () => {
     const newMode = !darkMode;
@@ -112,13 +119,82 @@ function App() {
     });
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+  const handleLogout = async (reason = 'user') => {
+    // Best-effort: tell the server to blacklist the current refresh token
+    // so it can't be reused after we drop it client-side. We don't block the
+    // local logout on this — if the request fails (e.g. already-expired
+    // refresh) we still wipe localStorage and proceed.
+    //
+    // WHY skip the server call when ``reason='session_expired'``: on a
+    // forced expiry the refresh token is already blacklisted server-side
+    // (the /api/refresh/ call that triggered this forced-logout itself
+    // returned 401). Hitting /api/logout/ again would just give us another
+    // 401 and waste a request. Settings.jsx route passes 'user' so the
+    // explicit Logout button still triggers the server-side blacklist.
+    const refresh = localStorage.getItem('refresh_token');
+    if (refresh && reason === 'user') {
+      try { await authService.logout(refresh); } catch (e) { /* ignore — tokens may already be invalid */ }
+    }
+    // If the active session came from Supabase, sign out there too so
+    // the next visit doesn't auto-rehydrate the same orphan user.
+    // We catch every error — a half-broken Supabase session must NEVER
+    // block local logout (the alternative is a user stuck logged-in on
+    // their own machine).
+    //
+    // The suppression flag short-circuits the SB ``SIGNED_OUT`` listener
+    // below so OUR initiative doesn't fan out a second
+    // "Session expired. Please log in again." toast — the user already
+    // saw the right copy ("Logged out!" / "Password changed" / "Account
+    // deleted") above. Only server-driven SIGNED_OUT events (whose
+    // initiator is NOT this very function) trigger the listener's
+    // ``handleLogout('session_expired')`` path.
+    if (isSupabaseSessionActive()) {
+      suppressNextSignOutBroadcast.current = true;
+      try {
+        const sb = getSupabase();
+        if (sb) {
+          const { error: sbOutErr } = await sb.auth.signOut();
+          if (sbOutErr) {
+            // eslint-disable-next-line no-console
+            console.warn('Supabase signOut error (non-fatal):', sbOutErr);
+          }
+        }
+      } catch (sbErr) {
+        // eslint-disable-next-line no-console
+        console.warn('Supabase signOut threw (non-fatal):', sbErr);
+      } finally {
+        // Reset on the next microtask so a *future* SB-driven sign-out
+        // (e.g. another tab signed us out, server-side expiry) still
+        // broadcasts normally. Setting to false synchronously here would
+        // still race the SB event because the SB SDK fires SIGNED_OUT
+        // AFTER the await above resolves — so it's safe to await, then
+        // clear. queueMicrotask ensures we clear on the same tick the
+        // SB listener finishes.
+        queueMicrotask(() => { suppressNextSignOutBroadcast.current = false; });
+      }
+    }
+    // Wipe EVERYTHING auth-related. `clearTokenPair` clears both Django
+    // and Supabase keys so a stale token from one system can't survive
+    // the next session (see api.js → clearTokenPair body).
+    clearTokenPair();
     setUser(null);
     setUserProgress([]);
     setActiveTab('commerce');
-    showToast(lang === 'ht' ? 'Ou dekonekte!' : 'Logged out!', 'sign-out-alt');
+    // Reason-aware toast: a forced expiry ≠ a user-clicked Logout, and
+    // saying "Ou dekonekte!" when the user didn't click anything just
+    // confuses them into thinking the server disconnected (see Profile
+    // page auto-logout bug). Per-reason copy:
+    let toastMsg = lang === 'ht' ? 'Ou dekonekte!' : 'Logged out!';
+    if (reason === 'session_expired') {
+      toastMsg = lang === 'ht'
+        ? 'Sesyon ou ekspire. Tanpri konekte ankò.'
+        : 'Session expired. Please log in again.';
+    } else if (reason === 'password_changed') {
+      toastMsg = lang === 'ht' ? 'Modpas chanje. Ou dekonekte.' : 'Password changed. Logged out.';
+    } else if (reason === 'account_deleted') {
+      toastMsg = lang === 'ht' ? 'Kont ou efase.' : 'Account deleted.';
+    }
+    showToast(toastMsg, 'sign-out-alt');
   };
 
   const refreshUser = () => {
@@ -158,11 +234,100 @@ function App() {
       setActiveTab('live_classroom');
     }
 
-    const token = localStorage.getItem('token');
+    // JWT: read from either Django (access_token / legacy token) or
+    // Supabase (sb_access_token). The api.js interceptor prioritizes
+    // sb_ over the Django pair, so as long as ANY token is present we
+    // can attempt /api/me/ and the right one will be sent.
+    const token =
+      localStorage.getItem('sb_access_token')
+      || localStorage.getItem('access_token')
+      || localStorage.getItem('token');
     const storedUser = localStorage.getItem('user');
-    
+
     if (storedUser) {
-      setUser(JSON.parse(storedUser));
+      try { setUser(JSON.parse(storedUser)); } catch { /* ignore corrupt cache */ }
+    }
+
+    // Listen for forced sign-outs triggered by the axios interceptor when the
+    // refresh token is rejected by the server (e.g. expired/blacklisted).
+    // Delegate to ``handleLogout`` so the reason-aware toast strings
+    // (Session expired / Password changed / Account deleted) match the
+    // event the server threw. We pull the ``reason`` from
+    // ``event.detail`` (defined in api.js → broadcastLogout).
+    const onForcedLogout = (e) => {
+      handleLogout(e?.detail?.reason || 'session_expired');
+    };
+    window.addEventListener('devrose:auth:logout', onForcedLogout);
+
+    // Supabase-session rehydration. If Supabase is configured AND the
+    // supabase-js client has a non-expired session in its own localStorage
+    // slot, mirror it into our sb_ keys before calling /api/me/ so the
+    // axios interceptor ships the right JWT. This lets a page reload
+    // keep the user signed-in when they originally signed in via Supabase.
+    //
+    // ORDER MATTERS: subscribe to onAuthStateChange FIRST (sync) so a
+    // TOKEN_REFRESHED fired during the await on getSupabaseSession()
+    // can't race past us and leave sb-devrose-auth out of sync with our
+    // mirrored sb_access_token.
+    let supabaseSub = null;
+    if (isSupabaseConfigured()) {
+      try {
+        const sbClient = getSupabase();
+        if (sbClient && sbClient.auth && typeof sbClient.auth.onAuthStateChange === 'function') {
+          const { data } = sbClient.auth.onAuthStateChange((event, session) => {
+            if (event === 'SIGNED_OUT' || !session) {
+              clearTokenPair();
+              setUser(null);
+              // If this SignOut came from ``handleLogout``'s own
+              // ``await sb.auth.signOut()`` call, the suppression flag
+              // is true and we SKIP the broadcast (handleLogout already
+              // showed its own toast). Otherwise — server-driven expiry,
+              // sign-out from another tab, etc. — we fan out so
+              // ``onForcedLogout`` can run ``handleLogout('session_expired')``
+              // and surface the "Session expired." toast. (Pre-fix, this
+              // path ran via the now-removed broadcast inside
+              // ``clearTokenPair()`` — removing that created a regression
+              // for SB users on server-side expiry, this restores it.)
+              if (!suppressNextSignOutBroadcast.current) {
+                broadcastLogout('session_expired');
+              }
+            } else if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && session?.access_token) {
+              try {
+                localStorage.setItem('sb_access_token', session.access_token);
+                if (session.refresh_token) localStorage.setItem('sb_refresh_token', session.refresh_token);
+              } catch (_) {}
+            }
+          });
+          supabaseSub = data?.subscription || null;
+        }
+      } catch (_) {
+        // Don't block boot if wiring fails — the axios interceptor
+        // still handles 401 refresh on its own via refreshSupabaseSession().
+      }
+      // 1. One-shot restore from localStorage (after the listener is
+      // wired so any concurrent TOKEN_REFRESHED is captured).
+      getSupabaseSession().then((session) => {
+        if (!session || !session.access_token) return;
+        try {
+          localStorage.setItem('sb_access_token', session.access_token);
+          if (session.refresh_token) localStorage.setItem('sb_refresh_token', session.refresh_token);
+        } catch (_) { /* ignore */ }
+        // 2. Refresh the canonical /api/me/ so the UI gets the Django-side
+        //    user + profile shape (canonical UserSerializer).
+        authService.getMe()
+          .then((res) => {
+            setUser(res.data);
+            try { localStorage.setItem('user', JSON.stringify(res.data)); } catch (_) {}
+          })
+          .catch((err) => {
+            // If /api/me/ STILL 401s after refreshSupabaseSession() ran
+            // inside the interceptor, the sb session is unrecoverable —
+            // give up and clear the sb pair so the next visit starts fresh.
+            if (err?.response?.status === 401) {
+              try { getSupabase()?.auth.signOut(); } catch (_) {}
+            }
+          });
+      });
     }
 
     if (token) {
@@ -170,8 +335,8 @@ function App() {
         .then(res => {
           const userData = res.data;
           setUser(userData);
-          localStorage.setItem('user', JSON.stringify(userData));
-          
+          try { localStorage.setItem('user', JSON.stringify(userData)); } catch (_) {}
+
           // Restore Session from Backend
           sessionService.get().then(sRes => {
             if (sRes.data.current_tab) {
@@ -186,10 +351,21 @@ function App() {
         .catch((err) => {
           console.error("Auth error:", err);
           if (err.response?.status === 401) {
-            handleLogout();
+            // 401 on boot's /api/me/ means the stored refresh token is
+            // dead — pass 'session_expired' so the user sees
+            // "Session expired. Please log in again." instead of the
+            // misleading "Ou dekonekte!" (which implies they clicked).
+            handleLogout('session_expired');
           }
         });
     }
+
+    return () => {
+      window.removeEventListener('devrose:auth:logout', onForcedLogout);
+      if (supabaseSub && typeof supabaseSub.unsubscribe === 'function') {
+        try { supabaseSub.unsubscribe(); } catch (_) {}
+      }
+    };
   }, []);
 
   const toggleFavorite = (courseId) => {
@@ -230,10 +406,14 @@ function App() {
       .then(res => {
         try {
           if (res.data && Array.isArray(res.data)) {
-            // Filter out courses that contain the word "Pro" (case-insensitive whole word) in their title
-            const nonPro = res.data.filter(course => course.title && !/\bpro\b/i.test(course.title));
-            // Shuffle the order of courses to randomize them on every refresh
-            const shuffled = shuffleArray(nonPro);
+            // Shuffle the order of courses to randomize them on every refresh.
+            // We intentionally do NOT filter titles (an earlier version hid
+            // any course whose title contained "Pro" via /\bpro\b/i — that
+            // dropped real sellable courses like "Python Pro (Automation)"
+            // from commerce + favori even after the user enrolled via the
+            // Wizard, which reads `selectedCourse` directly and bypassed
+            // this filter). Every course the API returns is rendered.
+            const shuffled = shuffleArray(res.data);
             setCourses(shuffled);
             setFilteredCourses(shuffled);
           }
@@ -419,7 +599,115 @@ function App() {
     }
   };
 
+  // Tabs that have their own dedicated shell (no app chrome, no
+  // header / tabs / footer / container). Both branches below follow
+  // the same "early return with a minimal shell" pattern. Mirroring
+  // kot3chat for the live_classroom tab means the Header / Tabs /
+  // Footer / container are completely absent from the DOM rather
+  // than conditionally hidden inside a shared shell — so they can't
+  // bleed through, scale the entry card, or race the fullscreen
+  // stage's z-index. The fullscreen stage additionally has its own
+  // top-right toolbar (chat toggle + leave button) for live controls.
   const isChatTab = activeTab === 'kot3chat';
+  const isClassroomTab = activeTab === 'live_classroom';
+
+  if (isClassroomTab) {
+    return (
+      <div className="App" style={{ height: '100vh', overflow: 'hidden', padding: 0, margin: 0 }}>
+        <div style={{
+          // Promote the wrapper itself to a flex container so the
+          // classroom content (LiveClassroom.jsx shell) is centered
+          // here, not inside the shell with a fragile `height: 100%`
+          // coupling. The bottom-nav (rendered as a sibling) is
+          // unaffected because flex only positions direct children;
+          // the fullscreen stage is `position: fixed` so it also
+          // escapes this layout and covers the full viewport.
+          height: 'calc(100vh - 70px)',
+          overflow: 'hidden',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          boxSizing: 'border-box',
+        }}>
+          {renderContent()}
+        </div>
+
+        <Settings
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          onAuthOpen={() => { setIsSettingsOpen(false); setIsAuthOpen(true); }}
+          lang={lang}
+          onLangChange={handleLangChange}
+          darkMode={darkMode}
+          toggleTheme={toggleTheme}
+          fontSize={fontSize}
+          setFontSize={setFontSize}
+          translations={translations}
+          user={user}
+          onLogout={handleLogout}
+          showToast={showToast}
+          onProfileUpdate={refreshUser}
+        />
+
+        <Auth
+          isOpen={isAuthOpen}
+          onClose={() => setIsAuthOpen(false)}
+          onLoginSuccess={handleLoginSuccess}
+          lang={lang}
+          showToast={showToast}
+        />
+
+        {/* Premium Bottom Navigation Bar — gives the user a way to
+            leave the classroom entry card. The fullscreen stage
+            (when activeRoom is set) hides this bar via
+            `body.live-fullscreen-active .bottom-nav-bar { display: none }`
+            in src/styles/index.css so the stage takes the full viewport. */}
+        <div className="bottom-nav-bar">
+          <button
+            className={`bottom-nav-item ${activeTab === 'commerce' ? 'active' : ''}`}
+            onClick={() => setActiveTab('commerce')}
+          >
+            <i className="fas fa-graduation-cap"></i>
+            <span>{lang === 'ht' ? 'Kou' : 'Courses'}</span>
+          </button>
+
+          <button
+            className={`bottom-nav-item ${activeTab === 'roadmap' ? 'active' : ''}`}
+            onClick={() => setActiveTab('roadmap')}
+          >
+            <i className="fas fa-route"></i>
+            <span>{lang === 'ht' ? 'Rout' : 'Roadmap'}</span>
+          </button>
+
+          <button
+            className={`bottom-nav-item ${activeTab === 'kot3chat' ? 'active' : ''}`}
+            onClick={() => setActiveTab('kot3chat')}
+          >
+            <i className="fab fa-facebook-messenger"></i>
+            <span>Kot3</span>
+          </button>
+
+          <button
+            className={`bottom-nav-item ${activeTab === 'live_classroom' ? 'active' : ''}`}
+            onClick={() => setActiveTab('live_classroom')}
+          >
+            <i className="fas fa-chalkboard-teacher"></i>
+            <span>{lang === 'ht' ? 'Klas Live' : 'Live Class'}</span>
+          </button>
+        </div>
+
+        <div id="toast-container">
+          {toasts.map(toast => (
+            <div key={toast.id} className="toast">
+              <i className={`fas fa-${toast.icon}`}></i>
+              <span>{toast.message}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (isChatTab) {
     return (
@@ -498,9 +786,7 @@ function App() {
         </div>
       </div>
     );
-  }
-
-  return (
+  }  return (
     <div className="App">      <Header
         lang={lang}
         translations={translations}
@@ -510,13 +796,13 @@ function App() {
         onOpenChat={() => setActiveTab('kot3chat')}
         unreadChatCount={0}
       />
-      
+
       <div className="container">
-        <Tabs 
-          activeTab={activeTab} 
-          setActiveTab={setActiveTab} 
-          lang={lang} 
-          translations={translations} 
+        <Tabs
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          lang={lang}
+          translations={translations}
         />
 
         <main id="main-content">

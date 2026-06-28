@@ -88,7 +88,8 @@ const Community = ({ lang, translations, user, showToast, onAuthOpen }) => {
   useEffect(() => {
     if (!user) return;
 
-    const token = localStorage.getItem('token');
+    // Read from new JWT key, fall back to legacy DRF Token key during migration.
+    const token = localStorage.getItem('access_token') || localStorage.getItem('token');
     const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socketUrl = `${protocol}${window.location.host}/ws/live/community/?token=${token}`;
 

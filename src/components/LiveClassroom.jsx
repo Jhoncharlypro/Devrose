@@ -383,7 +383,8 @@ const themePalette = {
     url.searchParams.set('room', sanitizedId);
     window.history.replaceState({}, '', url.toString());
     
-    const token = localStorage.getItem('token');
+    // Read from new JWT key, fall back to legacy DRF Token key during migration.
+    const token = localStorage.getItem('access_token') || localStorage.getItem('token');
     const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socketUrl = `${protocol}${window.location.host}/ws/live/${sanitizedId}/?token=${token}`;
     
@@ -1393,14 +1394,19 @@ const themePalette = {
           maxWidth: '1180px',
           padding: '24px',
           background: 'linear-gradient(180deg, rgba(20, 21, 31, 0.98), rgba(14, 15, 22, 0.98))',
-          borderRadius: '28px',
+          // border-radius removed per user feedback — the rounded card
+          // was making the page feel like a "floating panel" instead of
+          // a grounded, stable surface. Now it sits flat and centered
+          // in the viewport, with the existing boxShadow providing the
+          // only visual depth.
+          borderRadius: 0,
           color: 'white',
-          boxShadow: '0 18px 60px rgba(0, 0, 0, 0.42)',
+          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.35)',
           border: '1px solid rgba(255,255,255,0.08)'
         }}>
           <div style={{ fontSize: '3.5rem', marginBottom: '15px' }}><i className="fas fa-chalkboard-teacher"></i></div>
           <h2>{t.live_classroom_title}</h2>
-          <p style={{ maxWidth: '600px', margin: '0 auto 25px auto', fontSize: '1.15rem', opacity: 0.95, lineHeight: '1.5' }}>
+          <p style={{ maxWidth: '600px', margin: '0 auto 0 auto', fontSize: '1.15rem', opacity: 0.95, lineHeight: '1.5' }}>
             {lang === 'ht' ? 'Kreye oswa antre nan yon sal klas pèsonalize epi envite moun koute w an dirèk sou WebRTC.' : 'Create or join a custom classroom and invite others to watch/listen to your stream live.'}
           </p>
           
@@ -1416,7 +1422,7 @@ const themePalette = {
             {savedRoom && (
               <div style={{
                 width: '100%',
-                marginBottom: '10px',
+                marginBottom: '0',
                 padding: '14px 16px',
                 borderRadius: '18px',
                 background: 'rgba(255,255,255,0.12)',
@@ -1467,7 +1473,7 @@ const themePalette = {
             )}
             <div style={{
               width: '100%',
-              marginBottom: '12px',
+              marginBottom: '0',
               padding: '14px 16px',
               borderRadius: '18px',
               background: 'rgba(0,0,0,0.16)',
@@ -1571,7 +1577,13 @@ const themePalette = {
           height: '100vh',
           overflow: 'hidden',
           background: '#05070b',
-        zIndex: 40
+        // z-index raised to 9999 so the stage reliably sits above the
+        // app's sticky Header (z=1000) and bottom-nav (z=1000). Even
+        // though `body.live-fullscreen-active` should hide them via CSS,
+        // a high z-index here is a defensive belt-and-suspenders against
+        // any transition flicker (e.g. iOS Safari repaint timing where
+        // the sticky header paints a frame after the body class change).
+        zIndex: 9999
         }}>
           <div style={{
             position: 'absolute',

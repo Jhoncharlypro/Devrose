@@ -1270,11 +1270,17 @@ body.fx-matrix #matrix-canvas {
 body.fx-matrix {
     background-color: #000000 !important;
 }
-body.fx-matrix .App, 
-body.fx-matrix main, 
+body.fx-matrix .App,
+body.fx-matrix main,
 body.fx-matrix .product-card,
 body.fx-matrix .settings-overlay {
-    background-color: rgba(0, 0, 0, 0.45) !important;
+    /* Bumped from 0.45 → 0.85 (2026-Q2 fix) so the matrix rain stays
+       a *backdrop* effect instead of a full-page pink wash. The old
+       0.45 let the canvas (z-index -2) bleed through as a uniform
+       pink tint once the trails accumulated. 0.85 keeps a subtle
+       matrix hint visible at the margins while leaving the content
+       fully readable. */
+    background-color: rgba(0, 0, 0, 0.85) !important;
     backdrop-filter: blur(4px);
 }
 
@@ -1320,7 +1326,7 @@ body.cyber-cursor-active .settings-item {
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
     border-top: 1px solid rgba(216, 27, 96, 0.15);
-    border-radius: 25px 25px 0 0;
+    border-radius: 0;
     box-shadow: 0 -5px 25px rgba(0, 0, 0, 0.08);
     display: flex;
     justify-content: space-around;
@@ -1613,7 +1619,6 @@ body.dark-mode .bottom-nav-bar {
 body.live-fullscreen-active header,
 body.live-fullscreen-active .tabs-container,
 body.live-fullscreen-active footer,
-body.live-fullscreen-active .bottom-nav-bar,
 body.live-fullscreen-active .chat-btn,
 body.live-fullscreen-active .chat-window,
 body.live-fullscreen-active .settings-overlay,
@@ -1621,6 +1626,21 @@ body.live-fullscreen-active .ambient-bg-fx,
 body.live-fullscreen-active .cyber-particles,
 body.live-fullscreen-active #matrix-canvas {
   display: none !important;
+}
+
+/* Bottom-nav slides out smoothly when entering fullscreen. The naive
+   `display: none` was not transitionable, causing a hard pop as the
+   stage took the full viewport. Now the nav slides down + fades out
+   in 0.3s (reuses the existing `.bottom-nav-bar` `transition: all`
+   curve) so the transition feels like a polished "stage takes over"
+   rather than a layout jump. The fullscreen stage is at z-9999 so it
+   covers the same area immediately. Pointer events are also disabled
+   so the invisible bar can't accidentally capture clicks. */
+body.live-fullscreen-active .bottom-nav-bar {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  transform: translateY(100%) !important;
+  pointer-events: none !important;
 }
 
 body.live-fullscreen-active .container {

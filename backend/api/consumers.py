@@ -2,40 +2,19 @@ import json
 import time
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from asgiref.sync import sync_to_async
-from api.models import ChatThread, Message
+from api.models import ChatThread, Message, MessageReaction
 from django.contrib.auth.models import User
 from django.utils import timezone
+from api import presence
 
 # ----------------------------------------------------------------------
-# IMPORTANT — these dicts are PROCESS-LOCAL Python state.
-#
-# `online_users`, `typing_users`, `room_connections`, and
-# `room_user_channels` are kept as plain Python dicts inside the ASGI worker
-# process. That has two big consequences:
-#
-#   1. Single-server only: when you scale Daphne across multiple workers /
-#      pods / containers, each process has its own copy of these dicts, so
-#      the chat fabric SPLITS — a user on worker A will not see presence
-#      updates for a user on worker B. Fix: swap the channel layer to
-#      channels-redis and migrate these in-process dicts into shared storage
-#      (or rely purely on group_send() over Redis once the channel-group
-#      fan-out itself goes through Redis).
-#
-#   2. State evaporates on restart: every Daphne reload wipes the dicts. For
-#      soft features (typing indicators, viewer counts) that's fine — clients
-#      reconnect and re-derive state. For hard features ("must know who is
-#      online even after restart") this design is wrong.
-#
-# If you add a feature that needs cluster-wide consistency, do NOT just add
-# another dict here — wire it through the channel_layer instead. The
-# `online_users` and `typing_users` dicts exist for the convenience of NOT
-# round-tripping through Redis on every keystroke; that's a tradeoff for an
-# MVP, not a permanent design choice.
+# Presence: see ``api/presence.py`` for the storage layout and the
+# Redis-vs-LocalMemory fallback. The dicts that used to live here
+# (``online_users``, ``typing_users``, ``room_connections``,
+# ``room_user_channels``) have moved there so multi-worker Daphne
+# shares a single Redis ledger. When ``REDIS_URL`` is unset we still
+# serve single-worker dev via LocalMemoryBackend.
 # ----------------------------------------------------------------------
-online_users = {}  # user_id -> set of channel_names
-typing_users = {}  # thread_id -> {user_id: timestamp}
-room_connections = {}  # room_group_name -> {channel_name: user_info}
-room_user_channels = {}  # room_group_name -> {user_id: channel_name}
 
 class ClassroomLiveConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -54,15 +33,22 @@ class ClassroomLiveConsumer(AsyncJsonWebsocketConsumer):
             self.channel_name
         )
 
-        if self.room_group_name not in room_connections:
-            room_connections[self.room_group_name] = {}
-        if self.room_group_name not in room_user_channels:
-            room_user_channels[self.room_group_name] = {}
-        room_connections[self.room_group_name][self.channel_name] = user_info
+        # Record this channel_name in the Redis-backed room ledger. We
+        # MUST do this BEFORE checking for an existing channel on the
+        # same user_id, otherwise another worker (or the same worker on
+        # the previous WS) might race past us and miss the replacement
+        # signal.
+        await presence.room_join_async(
+            self.room_group_name, self.channel_name, user_info
+        )
 
-        existing_channel = None
+        # If the same user_id already has a live channel for this
+        # room, kick the old one out via group_send to its channel_name
+        # BEFORE we overwrite the (user_id -> channel_name) mapping.
         if user_info['user_id'] is not None:
-            existing_channel = room_user_channels[self.room_group_name].get(user_info['user_id'])
+            existing_channel = await presence.room_get_user_channel_async(
+                self.room_group_name, user_info['user_id']
+            )
             if existing_channel and existing_channel != self.channel_name:
                 await self.channel_layer.send(
                     existing_channel,
@@ -71,12 +57,19 @@ class ClassroomLiveConsumer(AsyncJsonWebsocketConsumer):
                         'replacement_channel_name': self.channel_name
                     }
                 )
-                room_connections[self.room_group_name].pop(existing_channel, None)
-            room_user_channels[self.room_group_name][user_info['user_id']] = self.channel_name
+                await presence.room_leave_async(
+                    self.room_group_name, existing_channel
+                )
+            await presence.room_set_user_channel_async(
+                self.room_group_name, user_info['user_id'], self.channel_name
+            )
 
+        # Pull the full peer roster for the welcome packet. We ask
+        # Redis for the whole HASH at once and filter the new
+        # channel_name client-side.
+        all_peers = await presence.room_list_async(self.room_group_name)
         other_peers = {
-            channel: info 
-            for channel, info in room_connections[self.room_group_name].items() 
+            channel: info for channel, info in all_peers.items()
             if channel != self.channel_name
         }
 
@@ -143,7 +136,7 @@ class ClassroomLiveConsumer(AsyncJsonWebsocketConsumer):
             )
 
     async def broadcast_viewer_count(self):
-        count = len(room_connections.get(self.room_group_name, {}))
+        count = await presence.room_count_async(self.room_group_name)
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -224,10 +217,12 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
         )
 
         await self.update_last_seen()
-        
-        if self.user.id not in online_users:
-            online_users[self.user.id] = set()
-        online_users[self.user.id].add(self.channel_name)
+
+        # Record this WS as one of ``self.user.id``'s open tabs. The
+        # backend (Redis or LocalMemory) deduplicates by channel_name.
+        await presence.mark_online_async(
+            self.user.id, self.channel_name, self.user.username,
+        )
 
         await self.channel_layer.group_send(
             'kot3_presence',
@@ -253,20 +248,24 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
     async def disconnect(self, close_code):
         self.connected = False
         # Note: Kot3ChatConsumer never joins a ClassroomLiveConsumer room
-        # (it never sets self.room_group_name), so the room_connections
-        # cleanup below is defensive — only ClassroomLiveConsumer ever populates it.
+        # (it never sets self.room_group_name), so the room cleanup below is
+        # defensive — only ClassroomLiveConsumer ever populates it.
         room_group_name = getattr(self, 'room_group_name', None)
         if room_group_name:
-            if room_group_name in room_connections:
-                room_connections[room_group_name].pop(self.channel_name, None)
-                if not room_connections[room_group_name]:
-                    del room_connections[room_group_name]
-            if room_group_name in room_user_channels and getattr(self, 'user', None) and self.user and self.user.is_authenticated:
-                current_channel = room_user_channels[room_group_name].get(self.user.id)
-                if current_channel == self.channel_name:
-                    room_user_channels[room_group_name].pop(self.user.id, None)
-                    if not room_user_channels[room_group_name]:
-                        del room_user_channels[room_group_name]
+            await presence.room_leave_async(room_group_name, self.channel_name)
+            if getattr(self, 'user', None) and self.user and self.user.is_authenticated:
+                # Clear the (user_id -> channel_name) mapping ONLY if
+                # it still points at this channel. A newer connection
+                # taken over via ``session_replaced`` will have already
+                # rewritten it to a different channel_name and we don't
+                # want to clobber that.
+                current = await presence.room_get_user_channel_async(
+                    room_group_name, self.user.id,
+                )
+                if current == self.channel_name:
+                    await presence.room_clear_user_channel_async(
+                        room_group_name, self.user.id,
+                    )
             await self.channel_layer.group_send(
                 room_group_name,
                 {
@@ -286,17 +285,25 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
 
         await self.update_last_seen()
 
-        if self.user.id in online_users:
-            online_users[self.user.id].discard(self.channel_name)
-            if not online_users[self.user.id]:
-                del online_users[self.user.id]
-                await self.broadcast_presence_to_threads('offline')
+        # Detach this channel_name from the user's online SET. ``mark_offline_async``
+        # returns the remaining channel count so we know whether the
+        # user is "fully offline" (count == 0) or just lost one tab.
+        remaining_channels = await presence.mark_offline_async(
+            self.user.id, self.channel_name,
+        )
+        if remaining_channels == 0:
+            await self.broadcast_presence_to_threads('offline')
 
-        for thread_id in list(typing_users.keys()):
-            if self.user.id in typing_users.get(thread_id, {}):
-                del typing_users[thread_id][self.user.id]
-                if not typing_users[thread_id]:
-                    del typing_users[thread_id]
+        # Cleanup: remove this user's typing indicator from every
+        # thread they're a participant in. Iterating the user's
+        # threads is cheap (one M2M query) and avoids the old
+        # ``for tid in list(typing_users.keys()):`` leak that walked
+        # threads the user had never typed in.
+        thread_ids = await sync_to_async(list)(
+            ChatThread.objects.filter(participants=self.user).values_list('id', flat=True)
+        )
+        for thread_id in thread_ids:
+            await presence.stop_typing_async(thread_id, self.user.id)
 
         await self.channel_layer.group_send(
             'kot3_presence',
@@ -403,15 +410,13 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             thread_id = content.get('thread_id')
             is_typing = content.get('is_typing', False)
             if self.current_thread_room and thread_id:
+                # Record / clear in the Redis-backed ZSET so peers on
+                # another Daphne worker also see the indicator fan-out
+                # via the channel-layer group.
                 if is_typing:
-                    if thread_id not in typing_users:
-                        typing_users[thread_id] = {}
-                    typing_users[thread_id][self.user.id] = time.time()
+                    await presence.mark_typing_async(thread_id, self.user.id)
                 else:
-                    if thread_id in typing_users and self.user.id in typing_users[thread_id]:
-                        del typing_users[thread_id][self.user.id]
-                        if not typing_users[thread_id]:
-                            del typing_users[thread_id]
+                    await presence.stop_typing_async(thread_id, self.user.id)
                 await self.channel_layer.group_send(
                     f'kot3_thread_{thread_id}',
                     {
@@ -463,6 +468,28 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
                     'sender_id': self.user.id
                 }
             )
+
+        elif msg_type == 'add_reaction':
+            # Step 3 (chat module additions): toggle a reaction. Payloads:
+            #   {type: 'add_reaction', thread_id, message_id, emoji}
+            # If the same (user, message, emoji) tuple already exists, we
+            # REMOVE it (Messenger-style toggle). This keeps the FE logic
+            # simple: "click again to undo".
+            message_id = content.get('message_id')
+            emoji = (content.get('emoji') or '').strip()
+            if message_id and str(message_id).isdigit() and emoji:
+                await self.toggle_reaction(int(message_id), emoji)
+
+        elif msg_type == 'forward_message':
+            # Step 4 (chat module additions): post a "forward" copy of an
+            # existing message into the *target* thread. Body (verbatim):
+            #   content / audio / image are copied from the original.
+            #   ``forwarded_from_id`` is the original message id.
+            #   ``target_thread_id`` is the destination thread.
+            target_thread_id = content.get('target_thread_id')
+            forwarded_from_id = content.get('forwarded_from_id')
+            if target_thread_id and forwarded_from_id and str(forwarded_from_id).isdigit():
+                await self.forward_message(int(forwarded_from_id), target_thread_id)
 
         elif msg_type == 'webrtc_signal':
             target_user_id = content.get('target_user_id')
@@ -537,8 +564,15 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
                 thread.updated_at = message.created_at
                 thread.save(update_fields=['updated_at'])
 
-                from ..serializers.chat import MessageSerializer as MsgSerializer
-                msg_data = MsgSerializer(message).data
+                # Pre-aggregate reaction rows so the inner
+                # MessageSerializer doesn't issue a per-row query for
+                # an N+1 fan-out on every send_message event.
+                from ..serializers.chat import (
+                    MessageSerializer as MsgSerializer,
+                    _build_reactions_context,
+                )
+                rxn_ctx = _build_reactions_context([message], self.user)
+                msg_data = MsgSerializer(message, context=rxn_ctx).data
 
                 # Notification payload strips heavy image so inbox is light
                 notification_payload = {**msg_data}
@@ -554,7 +588,7 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
                         'id': other_user.id,
                         'username': other_user.username,
                         'avatar': other_user.profile.avatar if (hasattr(other_user, 'profile') and other_user.profile.avatar) else None,
-                        'is_online': other_user.id in online_users
+                        'is_online': presence.is_online(other_user.id),
                     }
                 return {
                     'thread_id': thread_id,
@@ -593,7 +627,11 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
 
         # Mark message as delivered immediately if recipient is online
         try:
-            delivered_now = any(uid in online_users for uid in result['recipients'])
+            # One Redis SMEMBERS round-trip instead of N ``is_online``
+            # calls. The ``recipients`` list is small (typical N=1 for
+            # a 1-on-1 thread), but a group chat scales this.
+            online_set = await presence.online_user_ids_async()
+            delivered_now = any(uid in online_set for uid in result['recipients'])
             if delivered_now:
                 await sync_to_async(Message.objects.filter(id=result['message']['id']).update)(is_delivered=True)
                 result['message']['is_delivered'] = True
@@ -682,15 +720,6 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
                 'is_typing': event['is_typing']
             })
 
-    async def clean_old_typing(self):
-        now = time.time()
-        for thread_id in list(typing_users.keys()):
-            for user_id in list(typing_users[thread_id].keys()):
-                if now - typing_users[thread_id][user_id] > 4:
-                    del typing_users[thread_id][user_id]
-            if not typing_users[thread_id]:
-                del typing_users[thread_id]
-
     async def new_message_notification(self, event):
         await self.send_json({
             'type': 'notification',
@@ -778,3 +807,194 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             'type': 'new_story',
             'story': event['story']
         })
+
+    # ------------------------------------------------------------------
+    # Reactions (chat module Step 3)
+    # ------------------------------------------------------------------
+    async def toggle_reaction(self, message_id, emoji):
+        """
+        Toggle a (user, message, emoji) reaction row and broadcast a
+        ``reaction_update`` event on the thread group.
+
+        Why we send ``action: 'add'|'remove'`` instead of just the new
+        aggregate state: the FE can apply it incrementally (cheap) and
+        doesn't need to re-fetch the message; the existing reactions
+        chip just shows/hides the user's own entry.
+        """
+        def toggle_sync():
+            try:
+                msg = Message.objects.select_related('thread').get(id=message_id)
+            except Message.DoesNotExist:
+                return {'error': 'Message not found'}
+            if self.user not in msg.thread.participants.all():
+                return {'error': 'Not a participant'}
+            # Race-safe toggle (Reviewer MED #2). The whole read+write
+            # runs inside ``transaction.atomic`` so two concurrent
+            # toggles from the same user cannot both pass the
+            # existence check + create path. ``IntegrityError`` is the
+            # final fallback if a concurrent create races past the
+            # atomic block on a parallel channel.
+            from django.db import IntegrityError, transaction
+            action = None
+            with transaction.atomic():
+                # Use a plain .filter().first() (NO select_for_update)
+                # because SQLite — the dev fallback DB — raises
+                # ``NotSupportedError: SELECT FOR UPDATE is not supported``
+                # inside an atomic block. The race window is bounded by
+                # the schema-level ``UniqueConstraint(fields=('message',
+                # 'user', 'emoji'))`` so the ``except IntegrityError``
+                # branch below still catches the concurrent insert.
+                existing = MessageReaction.objects.filter(
+                    message=msg, user=self.user, emoji=emoji,
+                ).first()
+                if existing:
+                    existing.delete()
+                    action = 'remove'
+                else:
+                    try:
+                        MessageReaction.objects.create(message=msg, user=self.user, emoji=emoji)
+                        action = 'add'
+                    except IntegrityError:
+                        # A peer raced ahead of us. The row will end up
+                        # persisted either way; report 'add' so the FE
+                        # state stays consistent.
+                        action = 'add'
+            return {
+                'message_id': msg.id,
+                'thread_id': msg.thread_id,
+                'emoji': emoji,
+                'user_id': self.user.id,
+                'username': self.user.username,
+                'action': action,
+            }
+
+        result = await sync_to_async(toggle_sync)()
+        if 'error' in result:
+            await self.send_json({'type': 'error', 'message': result['error']})
+            return
+
+        await self.channel_layer.group_send(
+            f'kot3_thread_{result["thread_id"]}',
+            {
+                'type': 'reaction_update_broadcast',
+                'message_id': result['message_id'],
+                'emoji': result['emoji'],
+                'user_id': result['user_id'],
+                'username': result['username'],
+                'action': result['action'],
+            }
+        )
+
+    async def reaction_update_broadcast(self, event):
+        await self.send_json({
+            'type': 'reaction_update',
+            'message_id': event['message_id'],
+            'emoji': event['emoji'],
+            'user_id': event['user_id'],
+            'username': event['username'],
+            'action': event['action'],
+        })
+
+    # ------------------------------------------------------------------
+    # Forward (chat module Step 4)
+    # ------------------------------------------------------------------
+    async def forward_message(self, forwarded_from_id, target_thread_id):
+        """
+        Copy an existing message into ``target_thread_id`` as a new
+        Message row with ``forwarded_from`` pointing back to the
+        original. The original's sender name is snapshotted into
+        ``forward_sender_name`` so the bubble can still render the
+        "Forwarded from @bob" badge even if the original row is later
+        deleted.
+
+        We copy content + image + audio verbatim. We do NOT forward
+        read/delivery/edited state — those reset on the new copy.
+        """
+        def forward_sync():
+            try:
+                original = Message.objects.select_related('sender', 'thread').get(id=forwarded_from_id)
+            except Message.DoesNotExist:
+                return {'error': 'Original message not found'}
+            try:
+                target = ChatThread.objects.get(id=target_thread_id)
+            except ChatThread.DoesNotExist:
+                return {'error': 'Target thread not found'}
+            if self.user not in target.participants.all():
+                return {'error': 'Not a participant in target thread'}
+            new = Message.objects.create(
+                thread=target,
+                sender=self.user,
+                content=original.content,
+                audio=original.audio,
+                image=original.image,
+                forwarded_from=original,
+                # ``original.sender`` was loaded via select_related('sender'),
+                # so it cannot be None on a row that exists. Collapse
+                # the dead-branch defensive check (Reviewer LOW #5).
+                forward_sender_name=original.sender.username,
+            )
+            target.updated_at = new.created_at
+            target.save(update_fields=['updated_at'])
+            from ..serializers.chat import (
+                MessageSerializer as MsgSerializer,
+                _build_reactions_context,
+            )
+            rxn_ctx = _build_reactions_context([new], self.user)
+            payload = MsgSerializer(new, context=rxn_ctx).data
+            recipients = list(target.participants.exclude(id=self.user.id))
+            # Build the "other_user" view so the FE doesn't need a
+            # second round-trip to render the thread card on a forward
+            # (Reviewer LOW #3). Mirrors save_and_broadcast() shape.
+            other_user = target.participants.exclude(id=self.user.id).first()
+            other_data = None
+            if other_user:
+                other_data = {
+                    'id': other_user.id,
+                    'username': other_user.username,
+                    'avatar': other_user.profile.avatar if (hasattr(other_user, 'profile') and other_user.profile.avatar) else None,
+                    'is_online': presence.is_online(other_user.id),
+                }
+            return {
+                'thread_id': target.id,
+                'message': payload,
+                'recipients': [r.id for r in recipients],
+                'other_user': other_data,
+            }
+
+        result = await sync_to_async(forward_sync)()
+        if 'error' in result:
+            await self.send_json({'type': 'error', 'message': result['error']})
+            return
+
+        # Notify recipients (notification payload strips heavy media bytes).
+        # Mirrors save_and_broadcast() so the FE inbox look is consistent
+        # whether the message was sent directly or forwarded.
+        notification_payload = {**result['message']}
+        if result['message'].get('image'):
+            notification_payload['image'] = ''  # keep inbox light
+        if result['message'].get('audio'):
+            notification_payload['audio'] = ''
+            notification_payload['audio_pending'] = True
+        for uid in result['recipients']:
+            await self.channel_layer.group_send(
+                f'kot3_user_{uid}',
+                {
+                    'type': 'new_message_notification',
+                    'thread_id': result['thread_id'],
+                    'message': notification_payload,
+                    # other_user mirrors save_and_broadcast so the FE
+                    # renders the thread card with sender info (Reviewer
+                    # LOW #3).
+                    'other_user': result['other_user'],
+                }
+            )
+
+        # Broadcast to the thread room (everyone active in it sees it).
+        await self.channel_layer.group_send(
+            f'kot3_thread_{result["thread_id"]}',
+            {
+                'type': 'new_message',
+                'thread_id': result['thread_id'],
+                'message': result['message'],
+            }
+        )

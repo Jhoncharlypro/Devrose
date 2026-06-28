@@ -1,5 +1,81 @@
-import React, { useRef } from 'react';
-import { profileService } from '../services/api';
+import React, { useRef, useState } from 'react';
+import { profileService, authService, blocksService, mutesService } from '../services/api';
+
+// Extract the FIRST human-readable error string from a DRF-style
+// error body. The body is usually one of:
+//   { error: "Top-level message" }
+//   { detail: "Top-level message" }
+//   { field_name: ["First issue", "Second issue"] }
+//   { non_field_errors: ["..."] }
+// We walk a preferred-field order so the user always sees the SAME
+// first error (DRF doesn't guarantee key order). Falls back to null
+// when the body is unparseable so the caller can use the legacy
+// "Save failed" / "Cannot reach server" branch.
+const PREFERRED_API_ERROR_FIELDS = [
+  'cover_photo', 'avatar', 'username', 'bio', 'status_text',
+  'interests', 'social_links', 'country', 'notification_prefs',
+  'non_field_errors', 'detail', 'error',
+];
+function extractApiErrorMessage(data) {
+  if (!data) return null;
+  if (typeof data === 'string') return data;
+  if (typeof data !== 'object') return null;
+  for (const key of PREFERRED_API_ERROR_FIELDS) {
+    const v = data[key];
+    if (typeof v === 'string' && v) return v;
+    if (Array.isArray(v) && v.length && typeof v[0] === 'string') return v[0];
+  }
+  // Last resort: any key with a string / [string] value
+  for (const [k, v] of Object.entries(data)) {
+    if (k.startsWith('__')) continue;
+    if (typeof v === 'string' && v) return v;
+    if (Array.isArray(v) && v.length && typeof v[0] === 'string') return v[0];
+  }
+  return null;
+}
+
+// Resize an image File to fit within `maxWidth x maxHeight` (preserving
+// aspect ratio) and re-encode it as JPEG at the given quality. Returns
+// a Promise<string> (data URL).
+//
+// WHY this exists: the avatar + cover-photo upload paths used to
+// base64-encode the raw file and ship it. A 1.5 MB avatar → 2 MB
+// base64 body sat right at the Vite proxy body cap and the CORS
+// preflight blocked the 413 → generic NetworkError → "Cannot reach
+// server". A 5 MB cover photo → 6.7 MB base64 → same problem. With
+// this helper the output is typically <50 KB (avatar at 400x400 q=0.8)
+// or <100 KB (cover at 1200x400 q=0.85), so the request body stays
+// well below every upstream cap and the round-trip is fast on mobile.
+function resizeImage(file, maxWidth, maxHeight, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        // Cap dimensions while preserving aspect ratio.
+        if (width > maxWidth || height > maxHeight) {
+          const ratio = Math.min(maxWidth / width, maxHeight / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        // JPEG (not PNG) — photos are 3–5x smaller at the same
+        // visual quality. The 'image/jpeg' MIME is universally
+        // supported by <img> tags and the Supabase bucket.
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Image decode failed'));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error('File read failed'));
+    reader.readAsDataURL(file);
+  });
+}
 
 const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme, darkMode, fontSize, setFontSize, user, onLogout, translations, showToast, onProfileUpdate }) => {
   const t = translations[lang];
@@ -20,9 +96,74 @@ const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme
   const [sonicUi, setSonicUi] = React.useState(localStorage.getItem('devrose_sonic_ui') === 'true');
   const [cyberCursor, setCyberCursor] = React.useState(localStorage.getItem('devrose_cyber_cursor') === 'true');
 
+  // ============== PROFILE module state (0012) ==============
+  // Cover photo: mirrors the avatar upload pipeline but for a wide banner.
+  const [coverFileInputRef] = useState(() => React.createRef());
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
+  // Interests: array of short lowercase tags (max 10).
+  const [interests, setInterests] = useState(user?.profile?.interests || []);
+  const [newInterest, setNewInterest] = useState('');
+  // Social links: dict by platform.
+  const [socialLinks, setSocialLinks] = useState(user?.profile?.social_links || {});
+  // Country: ISO-3166 code, hydrated via GET /api/profile/countries/.
+  const [country, setCountry] = useState(user?.profile?.country || '');
+  const [countries, setCountries] = useState([]);
+  // Notification prefs: object of bools.
+  const [notifPrefs, setNotifPrefs] = useState(user?.profile?.notification_prefs || {});
+  // Block + mute lists.
+  const [blocks, setBlocks] = useState([]);
+  const [mutes, setMutes] = useState([]);
+  // Tab: which inner "Details" / "Notifications" / "Moderation" sub-section
+  // is currently expanded. Lets us avoid nesting 100+ rows vertically.
+  const [openProfileSection, setOpenProfileSection] = useState(null); // 'cover' | 'interests' | 'social' | 'country' | 'notif' | 'moderation' | null
+
+  // ============== Security & Account state (auth-extension phase) ==============
+  // Verify email: tracks whether the user's email is verified and the dev-mode
+  // token issued by /api/email/verify/send/ for the in-FE confirm step.
+  const [verifyEmailToken, setVerifyEmailToken] = useState('');
+  const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
+
+  // Change-password: 3-field inline form, hidden behind a "Change password"
+  // toggle so the Settings panel doesn't feel too tall.
+  const [isChangePwdOpen, setIsChangePwdOpen] = useState(false);
+  const [changePwdForm, setChangePwdForm] = useState({
+    current_password: '',
+    new_password: '',
+    confirm_new_password: '',
+  });
+  const [isChangingPwd, setIsChangingPwd] = useState(false);
+
+  // Delete account: simple typed-confirmation modal so a stray click can't
+  // wipe the user's data. We could build a styled modal but window.prompt is
+  // sufficient and keeps a single hard-coded barrier to entry ("DELETE").
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
   React.useEffect(() => {
     setTempBio(user?.profile?.bio || '');
     setTempUsername(user?.username || '');
+    // Hydrate the 0012 fields from the cached User object so the UI shows
+    // current values on first paint; no round-trip required.
+    setInterests(user?.profile?.interests || []);
+    setSocialLinks(user?.profile?.social_links || {});
+    setCountry(user?.profile?.country || '');
+    setNotifPrefs(user?.profile?.notification_prefs || {});
+  }, [user]);
+
+  // Fetch countries catalog + block/mute lists once on mount.
+  React.useEffect(() => {
+    if (!user) return;
+    profileService.getCountries()
+      .then(res => setCountries(res.data || []))
+      .catch(() => setCountries([]));
+    // Bug-fix (Reviewer): the prior shape had the `.catch()` INSIDE the
+    // arrow callback (`setBlocks(res.data || []).catch(...)`). Since
+    // React's setState returns `undefined`, that ``undefined.catch(...)``
+    // threw TypeError synchronously every render — the outer ``.catch``
+    // caught the TypeError and reset ``blocks = []`` every time, so the
+    // list was *always* empty even on a 200 response. The catch belongs
+    // on the Promise itself, not the side effect.
+    blocksService.list().then(res => setBlocks(res.data || [])).catch(() => setBlocks([]));
+    mutesService.list().then(res => setMutes(res.data || [])).catch(() => setMutes([]));
   }, [user]);
 
   React.useEffect(() => {
@@ -198,9 +339,16 @@ const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme
       const columns = Math.floor(canvas.width / 20) + 1;
       const ypos = Array(columns).fill(0);
 
-      const matrix = () => {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const matrix = () => {
+      // Tightened the trail-fade from 0.05 → 0.15 so each frame clears
+      // ~15 % of the previous one (was 5 %). The original 0.05 let text
+      // accumulate over many seconds until the screen was a uniform
+      // pink wash. 0.15 keeps the classic "matrix rain" trail feel
+      // (previous text still visible for ~1 s before fading) without
+      // the fill — see handleResetAppearance for the user's escape
+      // hatch if a different FX combination still misbehaves.
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
         ctx.fillStyle = themeColor;
         ctx.font = '15pt monospace';
@@ -275,36 +423,318 @@ const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme
       .finally(() => setIsSavingUsername(false));
   };
 
+  // ============== Security & Account handlers ==============
+
+  // Resend a verify-email token. Dev mode returns the token in the response
+  // body so the user can paste it back into the UI to simulate "clicking
+  // the link in your email".
+  const handleSendVerifyEmail = async () => {
+    setIsVerifyingEmail(true);
+    try {
+      const { data } = await authService.sendEmailVerification();
+      if (data?.dev_verify_token) {
+        setVerifyEmailToken(String(data.dev_verify_token));
+        if (showToast) showToast(t.verify_email_success || 'Verification email sent.', 'envelope');
+      } else {
+        if (showToast) showToast(t.verify_email_success || 'Verification email sent.', 'envelope');
+      }
+    } catch (err) {
+      console.error('sendVerifyEmail error:', err);
+      if (showToast) showToast(err.response?.data?.error || 'Error sending verification email.', 'exclamation-triangle');
+    } finally {
+      setIsVerifyingEmail(false);
+    }
+  };
+
+  // Consume the dev-mode token (or the emailed one in production) to mark
+  // the email as verified.
+  const handleConfirmVerifyEmail = async () => {
+    if (!verifyEmailToken.trim()) {
+      if (showToast) showToast(lang === 'ht' ? 'Mete token verifye a.' : 'Please paste the verify token first.', 'exclamation-triangle');
+      return;
+    }
+    setIsVerifyingEmail(true);
+    try {
+      await authService.confirmEmailVerification(verifyEmailToken.trim());
+      if (showToast) showToast(t.verify_email_success || 'Email verified.', 'check-circle');
+      setVerifyEmailToken('');
+      if (onProfileUpdate) onProfileUpdate();
+    } catch (err) {
+      const msg = err.response?.data?.error || (lang === 'ht' ? 'Token verifye a pa bon.' : 'Invalid verification token.');
+      if (showToast) showToast(msg, 'exclamation-triangle');
+    } finally {
+      setIsVerifyingEmail(false);
+    }
+  };
+
+  // Change password: validate locally first (don't burn server roundtrips
+  // on something the validators could catch), then PUT current + new.
+  const handleChangePassword = async () => {
+    const { current_password, new_password, confirm_new_password } = changePwdForm;
+    if (!current_password || !new_password) {
+      if (showToast) showToast(lang === 'ht' ? 'Ranpli tout chan yo.' : 'Please fill all fields.', 'exclamation-triangle');
+      return;
+    }
+    if (new_password !== confirm_new_password) {
+      if (showToast) showToast(t.change_password_mismatch || 'Passwords do not match.', 'exclamation-triangle');
+      return;
+    }
+    if (new_password.length < 6) {
+      if (showToast) showToast(lang === 'ht' ? 'Modpas dwe omwen 6 karaktè.' : 'Password must be at least 6 chars.', 'exclamation-triangle');
+      return;
+    }
+    setIsChangingPwd(true);
+    try {
+      await authService.changePassword({ current_password, new_password });
+      if (showToast) showToast(t.change_password_success || 'Password changed.', 'check-circle');
+      // The server blacklists ALL outstanding refresh tokens for this user,
+      // so force logout client-side too. Pass 'password_changed' so the
+      // bounce toast says "Password changed. Logged out." instead of the
+      // generic "Logged out!" that would otherwise fire via the user path.
+      if (onLogout) onLogout('password_changed');
+      if (onClose) onClose();
+    } catch (err) {
+      const msg = err.response?.data?.error || (lang === 'ht' ? 'Erè nan chanje modpas.' : 'Error changing password.');
+      if (showToast) showToast(msg, 'exclamation-triangle');
+    } finally {
+      setIsChangingPwd(false);
+    }
+  };
+
+  // ============== Reset Appearance (defensive escape hatch) ==============
+  // One-click nuclear option for the user. Clears every localStorage key
+  // the appearance system writes to (theme color, ambient FX, card
+  // style, sonic UI, cyber cursor, font family, dark-mode flag) and
+  // reloads the page so every React effect + body class re-derives from
+  // the default. Solves the "the page became a uniform pink wash" /
+  // "matrix FX filled the screen" / "cyber-cursor stuck" class of
+  // issues that happen when a stacked FX combination overpaints the
+  // content. The Django + Supabase auth keys are deliberately left
+  // alone — the user is still logged in afterwards.
+  const handleResetAppearance = () => {
+    const ok = window.confirm(
+      lang === 'ht'
+        ? 'Reyajiste tout paramèt aparans? W ap toujou konekte.'
+        : 'Reset all appearance settings? You will stay logged in.'
+    );
+    if (!ok) return;
+    const APPEARANCE_KEYS = [
+      'devrose_theme_color',
+      'devrose_ambient_fx',
+      'devrose_card_style',
+      'devrose_sonic_ui',
+      'devrose_cyber_cursor',
+      'devrose_font_family',
+      'devrose_theme',
+      'devrose_fontsize',
+      // Kot3chat theme system: see src/hooks/useResolvedTheme.js header
+      // for the full read/write contract. Without these two, the
+      // 'system' / 'custom' sentinel and the user's custom accent
+      // would survive the reset and the all-pink bug could return.
+      'kot3_active_theme',
+      'kot3_custom_accent',
+    ];
+    APPEARANCE_KEYS.forEach((k) => {
+      try { localStorage.removeItem(k); } catch (_) { /* ignore */ }
+    });
+    // Hard reload so every effect re-derives from defaults — cleaner
+    // than trying to reset each useEffect's local state by hand.
+    window.location.reload();
+  };
+
+  // Delete account: requires the user to literally type "DELETE" in a
+  // window.prompt to weed out accidental clicks. After the server confirms,
+  // clear local tokens and bounce back to the sign-in modal.
+  const handleDeleteAccount = () => {
+    const confirmText = window.prompt(t.delete_account_confirm_prompt || 'Type DELETE to confirm:');
+    if (confirmText !== 'DELETE') {
+      if (showToast) showToast(lang === 'ht' ? 'Aksyon anile.' : 'Cancelled.', 'info-circle');
+      return;
+    }
+    setIsDeletingAccount(true);
+    authService.deleteAccount()
+      .then(() => {
+      if (showToast) showToast(t.delete_account_success || 'Account deleted.', 'check-circle');
+      // Pass 'account_deleted' so the bounce toast doesn't pretend the
+      // user clicked Logout. ``handleLogout`` (App.jsx) calls
+      // ``clearTokenPair()`` internally and shows the toast — no need
+      // to pre-clear here.
+      if (onLogout) onLogout('account_deleted');
+      if (onClose) onClose();
+      })
+      .catch(err => {
+        console.error('deleteAccount error:', err);
+        const msg = err.response?.data?.error || (lang === 'ht' ? 'Erè nan efase kont la.' : 'Error deleting account.');
+        if (showToast) showToast(msg, 'exclamation-triangle');
+      })
+      .finally(() => setIsDeletingAccount(false));
+  };
+
+  // ============== PROFILE module handlers (0012) ==============
+  // Cover photo upload. Resized to 1200x400 JPEG q=0.85 BEFORE
+  // base64-encoding via the module-level `resizeImage` helper, so
+  // even a 10 MB raw photo produces a <100 KB request body (a raw
+  // 5 MB cover → 6.7 MB base64 was hitting the Vite proxy body
+  // cap → CORS-preflight-blocked 413 → "Cannot reach server").
+  const handleCoverPhotoChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Pre-flight size cap is 10 MB — generous because resizeImage
+    // downscales anything wider than 1200px before base64-encoding.
+    if (file.size > 10 * 1024 * 1024) {
+      showToast?.(lang === 'ht' ? 'Foto kouvèti a twò gwo (max 10MB).' : 'Cover photo too large (max 10MB).', 'exclamation-triangle');
+      return;
+    }
+    setIsUploadingCover(true);
+    resizeImage(file, 1200, 400, 0.85)
+      .then(base64 => profileService.updateMe({ cover_photo: base64 }, { timeout: 60000 }))
+      .then(() => {
+        showToast?.(lang === 'ht' ? 'Foto kouvèti a mete ajou!' : 'Cover photo updated!', 'camera');
+        onProfileUpdate?.();
+      })
+      // 3-tier fallback (same shape as handlePhotoChange):
+      //   1. Server-supplied human-readable error (DRF field errors
+      //      are walked in a stable field order via the module-level
+      //      extractApiErrorMessage helper).
+      //   2. Generic "Save failed" when a response came back but
+      //      we couldn't extract a clean message.
+      //   3. "Cannot reach server" only when axios finished without
+      //      *any* response (true network error / abort).
+      // We append err.message so a timeout / abort surfaces the
+      // underlying cause ("timeout of 30000ms exceeded", etc.)
+      // instead of the vague fallback string.
+      .catch(err => {
+        const serverMsg = extractApiErrorMessage(err.response?.data);
+        const reason = serverMsg
+          || (err.response
+                ? (lang === 'ht' ? 'Echèk nan sove.' : 'Save failed.')
+                : (lang === 'ht' ? 'Pa kapab rejwenn sèvè a.' : 'Cannot reach server.'));
+        const detail = err.message ? ` (${err.message})` : '';
+        showToast?.(reason + detail, 'exclamation-triangle');
+      })
+      .finally(() => setIsUploadingCover(false));
+  };
+
+  // Interest tag add — uppercase 'Enter' key + dedupe. Server caps at 10 tags.
+  const addInterest = () => {
+    const tag = newInterest.trim().toLowerCase();
+    if (!tag) return;
+    if (interests.includes(tag)) { setNewInterest(''); return; }
+    if (interests.length >= 10) {
+      showToast?.(lang === 'ht' ? 'Maksimòm 10 tags.' : 'Maximum 10 tags.', 'exclamation-triangle');
+      return;
+    }
+    const next = [...interests, tag.slice(0, 30)];
+    setInterests(next);
+    setNewInterest('');
+    profileService.updateMe({ interests: next }).catch(() => {
+      showToast?.(lang === 'ht' ? 'Erè nan sove.' : 'Save error.', 'exclamation-triangle');
+    });
+  };
+
+  const removeInterest = (tag) => {
+    const next = interests.filter(t => t !== tag);
+    setInterests(next);
+    profileService.updateMe({ interests: next }).catch(() => {
+      showToast?.(lang === 'ht' ? 'Erè nan sove.' : 'Save error.', 'exclamation-triangle');
+    });
+  };
+
+  // Social link blur-save — fires when the user tabs out of the input.
+  const saveSocialLink = (platform, value) => {
+    const next = { ...socialLinks, [platform]: value };
+    if (!value) delete next[platform]; // clear sends an empty string to the BE
+    setSocialLinks(next);
+    profileService.updateMe({ social_links: next }).catch(err => {
+      showToast?.(err.response?.data?.error || 'Save error', 'exclamation-triangle');
+    });
+  };
+
+  const saveCountry = (code) => {
+    setCountry(code);
+    profileService.updateMe({ country: code }).catch(() => {
+      showToast?.(lang === 'ht' ? 'Erè nan sove peyi a.' : 'Save error.', 'exclamation-triangle');
+    });
+  };
+
+  const toggleNotifPref = (key) => {
+    const next = { ...notifPrefs, [key]: !notifPrefs[key] };
+    setNotifPrefs(next);
+    profileService.updateMe({ notification_prefs: next }).catch(() => {
+      showToast?.('Save error', 'exclamation-triangle');
+    });
+  };
+
+  // Block / mute moderation actions.
+  const handleUnblock = async (rowId) => {
+    try {
+      await blocksService.remove(rowId);
+      setBlocks(blocks.filter(b => b.id !== rowId));
+      showToast?.(lang === 'ht' ? 'Debloke!' : 'Unblocked!', 'check-circle');
+    } catch (err) {
+      showToast?.(err.response?.data?.error || 'Error', 'exclamation-triangle');
+    }
+  };
+
+  const handleUnmute = async (rowId) => {
+    try {
+      await mutesService.remove(rowId);
+      setMutes(mutes.filter(m => m.id !== rowId));
+      showToast?.(lang === 'ht' ? 'Retire nan mòd silans!' : 'Unmuted!', 'check-circle');
+    } catch (err) {
+      showToast?.(err.response?.data?.error || 'Error', 'exclamation-triangle');
+    }
+  };
+
   const handlePhotoChange = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      if (file.size > 3 * 1024 * 1024) {
-         alert(lang === 'ht' ? 'Foto a twò gwo (max 3MB)' : 'Photo too large (max 3MB)');
-         return;
-      }
-      
-      setIsUploading(true);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = reader.result;
-        profileService.updateMe({ avatar: base64 })
-          .then(() => {
-            if (showToast) showToast(lang === 'ht' ? 'Foto a chanje!' : 'Photo updated!', 'camera');
-            if (onProfileUpdate) onProfileUpdate();
-          })
-          .catch(err => {
-            console.error("Upload error:", err);
-            const errorMsg = err.response?.data?.error || (typeof err.response?.data === 'object' ? JSON.stringify(err.response.data) : null);
-            alert((lang === 'ht' ? "Erè nan moute foto a: " : "Error uploading photo: ") + (errorMsg || err.message));
-          })
-          .finally(() => setIsUploading(false));
-      };
-      reader.onerror = () => {
-        setIsUploading(false);
-        alert("Erè nan li fichye a.");
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+    const accessToken =
+      localStorage.getItem('access_token')
+      || localStorage.getItem('sb_access_token');
+    if (!accessToken) {
+      if (showToast) showToast(lang === 'ht' ? 'Ou dwe konekte anvan ou moute foto a.' : 'You must log in before uploading a photo.', 'exclamation-triangle');
+      if (onAuthOpen) onAuthOpen();
+      return;
     }
+    if (!file.type.startsWith('image/')) {
+      if (showToast) showToast(lang === 'ht' ? 'Chwazi yon fichye foto sèlman.' : 'Please select an image file.', 'exclamation-triangle');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      if (showToast) showToast(lang === 'ht' ? 'Foto a twò gwo (max 10MB).' : 'Photo too large (max 10MB).', 'exclamation-triangle');
+      e.target.value = '';
+      return;
+    }
+    setIsUploading(true);
+    resizeImage(file, 400, 400, 0.8)
+      .then(base64 => {
+        const len = (base64 || '').length;
+        console.info('[PhotoUpload] resize OK length=', len, 'type=', base64?.slice(0, 30));
+        return profileService.updateMe({ avatar: base64 }, { timeout: 120000 });
+      })
+      .then(res => {
+        console.info('[PhotoUpload] updateMe status=', res?.status, 'dataKeys=', Object.keys(res?.data || {}));
+        if (showToast) showToast(lang === 'ht' ? 'Foto a chanje!' : 'Photo updated!', 'camera');
+        if (onProfileUpdate) onProfileUpdate();
+      })
+      .catch(err => {
+        console.error('[PhotoUpload] full error object:', err);
+        console.error('[PhotoUpload] err.message:', err?.message);
+        console.error('[PhotoUpload] err.code:', err?.code);
+        console.error('[PhotoUpload] err.response:', err?.response);
+        console.error('[PhotoUpload] err.stack:', err?.stack);
+        e.target.value = '';
+        const serverMsg = extractApiErrorMessage(err?.response?.data);
+        let reason = serverMsg
+          || (err?.response
+                ? (lang === 'ht' ? 'Echèk nan sove.' : 'Save failed.')
+                : (lang === 'ht' ? 'Pa kapab rejwenn sèvè a.' : 'Cannot reach server.'));
+        const detail = err?.message ? ` (${err.message})` : '';
+        alert((lang === 'ht' ? "Erè nan moute foto a: " : "Error uploading photo: ") + reason + detail);
+      })
+      .finally(() => setIsUploading(false));
   };
 
   const languages = [
@@ -553,6 +983,36 @@ const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme
         {/* Appearance Section */}
         <div className="settings-section-title" style={{ padding: '15px 20px 10px 20px', fontSize: '0.8rem', fontWeight: 'bold', color: '#888', textTransform: 'uppercase' }}>{t.appearance_section}</div>
         <div className="settings-section" style={{ background: 'var(--white)', borderRadius: '15px', marginBottom: '25px', overflow: 'hidden' }}>
+          {/* Reset Appearance — always-visible distress escape. Sits at
+              the TOP of the Appearance section (NOT buried behind the
+              Advanced Personalization toggle) so a user stuck in the
+              "all pink" / "matrix filled the screen" / "cyber-cursor
+              stuck" class of issues can find it in one click without
+              expanding anything. See handleResetAppearance for the
+              full key list. Auth tokens are NOT touched. */}
+          <div className="settings-item" style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'linear-gradient(90deg, rgba(216, 27, 96, 0.06), rgba(216, 27, 96, 0.02))', borderBottom: '1px solid var(--pink-light)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: 0 }}>
+              <i className="fas fa-undo" style={{ width: '30px', height: '30px', background: 'var(--pink-primary)', color: '#fff', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}></i>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{lang === 'ht' ? 'Reyajiste tout aparans' : 'Reset all appearance'}</span>
+                <span style={{ fontSize: '0.72rem', color: '#888' }}>
+                  {lang === 'ht'
+                    ? 'Retire tout efè vizyèl + tèm. W ap toujou konekte.'
+                    : 'Clear all visual FX + theme. You will stay logged in.'}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleResetAppearance}
+              className="btn-reset"
+              title={lang === 'ht' ? 'Reyajiste tout' : 'Reset all'}
+              style={{ padding: '7px 14px', fontSize: '0.75rem', borderRadius: '14px', flexShrink: 0, background: 'var(--pink-primary)', color: '#fff' }}
+            >
+              <i className="fas fa-rotate-left" style={{ marginRight: '4px' }}></i>
+              {lang === 'ht' ? 'Reyajiste' : 'Reset'}
+            </button>
+          </div>
           <div className="settings-item" onClick={toggleTheme} style={{ padding: '15px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--pink-light)', cursor: 'pointer' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
               <i className={`fas ${darkMode ? 'fa-sun' : 'fa-moon'}`} style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
@@ -788,28 +1248,361 @@ const Settings = ({ isOpen, onClose, onAuthOpen, lang, onLangChange, toggleTheme
           ))}
         </div>
 
-        {/* Security & Info Section */}
+        {/* Profile Details Section (PROFILE module 0012) */}
         {user && (
           <>
             <div className="settings-section-title" style={{ padding: '15px 20px 10px 20px', fontSize: '0.8rem', fontWeight: 'bold', color: '#888', textTransform: 'uppercase' }}>
-              {lang === 'ht' ? 'Sekirite ak Enfòmasyon' : 'Security & Info'}
+              {t.profile_section || (lang === 'ht' ? 'Detay Profil' : 'Profile Details')}
             </div>
             <div className="settings-section" style={{ background: 'var(--white)', borderRadius: '15px', marginBottom: '25px', overflow: 'hidden' }}>
-              <div 
-                className="settings-item" 
-                onClick={() => setShowEmail(!showEmail)} 
-                style={{ padding: '15px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+              {/* Cover photo */}
+              <div className="settings-item" style={{ padding: '15px 20px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'cover' ? null : 'cover')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-image" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.cover_photo || 'Cover photo'}</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'cover' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'cover' && (
+                  <div style={{ marginTop: '10px' }}>
+                    {(user?.profile?.cover_photo) && (
+                      <img src={user.profile.cover_photo} alt="cover" style={{ width: '100%', maxHeight: '160px', objectFit: 'cover', borderRadius: '10px', marginBottom: '10px' }} />
+                    )}
+                    <input type="file" ref={coverFileInputRef} onChange={handleCoverPhotoChange} accept="image/*" style={{ display: 'none' }} />
+                    <button type="button" className="btn-action" onClick={() => coverFileInputRef.current?.click()} disabled={isUploadingCover} style={{ padding: '8px 14px', fontSize: '0.8rem', borderRadius: '14px' }}>
+                      {isUploadingCover ? <i className="fas fa-spinner fa-spin"></i> : (lang === 'ht' ? 'Chwazi yon foto' : 'Choose photo')}
+                    </button>
+                    <p style={{ fontSize: '0.72rem', color: '#888', marginTop: '6px', marginBottom: 0 }}>{t.cover_photo_hint}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Interests tag input */}
+              <div className="settings-item" style={{ padding: '15px 20px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'interests' ? null : 'interests')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-tags" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.interests_section || 'Interests'}</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'interests' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'interests' && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <input
+                        type="text"
+                        value={newInterest}
+                        onChange={(e) => setNewInterest(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addInterest(); } }}
+                        placeholder={t.interests_placeholder || 'Type a tag and press Enter'}
+                        maxLength={30}
+                        className="form-control"
+                        style={{ fontSize: '0.8rem', padding: '8px 10px', flex: 1 }}
+                      />
+                      <button type="button" className="btn-action" onClick={addInterest} disabled={!newInterest.trim()} style={{ padding: '8px 12px', fontSize: '0.8rem', borderRadius: '14px' }}>
+                        {lang === 'ht' ? 'Ajoute' : 'Add'}
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      {interests.map(tag => (
+                        <span key={tag} className="kot3-interests-chip" style={{ padding: '4px 10px', borderRadius: '20px', background: 'var(--pink-light)', color: 'var(--pink-primary)', fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
+                          #{tag}
+                          <button type="button" onClick={() => removeInterest(tag)} style={{ background: 'transparent', border: 'none', color: 'var(--pink-primary)', cursor: 'pointer', padding: 0, fontSize: '0.7rem' }} aria-label={`Remove ${tag}`}>
+                            <i className="fas fa-xmark"></i>
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <p style={{ fontSize: '0.72rem', color: '#888', margin: 0 }}>{t.interests_hint}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Social links */}
+              <div className="settings-item" style={{ padding: '15px 20px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'social' ? null : 'social')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-share-nodes" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.social_links_section || 'Social Links'}</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'social' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'social' && (
+                  <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '8px', alignItems: 'center' }}>
+                    {['instagram', 'whatsapp', 'website', 'twitter', 'linkedin', 'github'].map(platform => (
+                      <React.Fragment key={platform}>
+                        <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-main)', textTransform: 'capitalize' }}>{platform}</label>
+                        <input
+                          type="url"
+                          value={socialLinks[platform] || ''}
+                          onChange={(e) => setSocialLinks({ ...socialLinks, [platform]: e.target.value })}
+                          onBlur={(e) => saveSocialLink(platform, e.target.value)}
+                          placeholder={`https://${platform === 'website' ? 'example.com' : platform + '.com/user'}`}
+                          className="form-control"
+                          style={{ fontSize: '0.78rem', padding: '6px 8px' }}
+                        />
+                      </React.Fragment>
+                    ))}
+                    <p style={{ gridColumn: '1 / span 2', fontSize: '0.72rem', color: '#888', margin: 0 }}>{t.social_links_hint}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Country dropdown */}
+              <div className="settings-item" style={{ padding: '15px 20px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'country' ? null : 'country')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-globe" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.country_section || 'Country'}</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'country' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'country' && (
+                  <div style={{ marginTop: '10px' }}>
+                    <select
+                      value={country}
+                      onChange={(e) => saveCountry(e.target.value)}
+                      className="form-control"
+                      style={{ fontSize: '0.8rem', padding: '8px 10px', width: '100%', borderRadius: '10px' }}
+                    >
+                      <option value="">{t.country_select || 'Select your country'}</option>
+                      {countries.map(c => (
+                        <option key={c.code} value={c.code}>{c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {/* Notification toggles */}
+              <div className="settings-item" style={{ padding: '15px 20px' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'notif' ? null : 'notif')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-bell" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.notif_section || 'Notifications'}</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'notif' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'notif' && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {[
+                      ['sound', t.notif_sound || 'Sounds'],
+                      ['desktop_notif', t.notif_desktop || 'Desktop notifications'],
+                      ['email_notif', t.notif_email || 'Email notifications'],
+                      ['message_preview', t.notif_preview || 'Show message preview'],
+                    ].map(([key, label]) => (
+                      <div key={key} className="settings-subitem" onClick={() => toggleNotifPref(key)} style={{ padding: '8px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                        <span style={{ fontSize: '0.82rem' }}>{label}</span>
+                        <label className="switch" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={!!notifPrefs[key]} onChange={() => toggleNotifPref(key)} />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Block & Mute Section */}
+            <div className="settings-section-title" style={{ padding: '15px 20px 10px 20px', fontSize: '0.8rem', fontWeight: 'bold', color: '#888', textTransform: 'uppercase' }}>
+              {t.block_section || (lang === 'ht' ? 'Blòk + Mòd' : 'Block & Mute')}
+            </div>
+            <div className="settings-section" style={{ background: 'var(--white)', borderRadius: '15px', marginBottom: '25px', overflow: 'hidden' }}>
+              <div className="settings-item" style={{ padding: '15px 20px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div onClick={() => setOpenProfileSection(openProfileSection === 'moderation' ? null : 'moderation')} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-user-slash" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.blocked_users || 'Blocked users'} ({blocks.length})</span>
+                  </div>
+                  <i className={`fas ${openProfileSection === 'moderation' ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {openProfileSection === 'moderation' && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {blocks.length === 0 && <p style={{ fontSize: '0.78rem', color: '#888', margin: 0 }}>{t.no_blocked_users || 'No blocked users.'}</p>}
+                    {blocks.map(b => (
+                      <div key={b.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', fontSize: '0.82rem', borderBottom: '1px solid var(--pink-light)' }}>
+                        <span>{b.blocked?.username || `#${b.blocked_id || b.user_id}`}</span>
+                        <button type="button" className="btn-action" onClick={() => handleUnblock(b.id)} style={{ padding: '4px 12px', fontSize: '0.7rem', borderRadius: '12px' }}>
+                          {t.unblock_btn || 'Unblock'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="settings-item" style={{ padding: '15px 20px' }}>
+                <div style={{ marginBottom: '10px', fontWeight: 500, fontSize: '0.85rem' }}>
+                  {t.muted_users || 'Muted users'} ({mutes.length})
+                </div>
+                {mutes.length === 0 && <p style={{ fontSize: '0.78rem', color: '#888', margin: 0 }}>{t.no_muted_users || 'No muted users.'}</p>}
+                {mutes.map(m => (
+                  <div key={m.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', fontSize: '0.82rem' }}>
+                    <span>{m.muted?.username || `#${m.muted_id || m.user_id}`}</span>
+                    <button type="button" className="btn-action" onClick={() => handleUnmute(m.id)} style={{ padding: '4px 12px', fontSize: '0.7rem', borderRadius: '12px' }}>
+                      {t.unmute_btn || 'Unmute'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Security & Account Section */}
+        {user && (
+          <>
+            <div className="settings-section-title" style={{ padding: '15px 20px 10px 20px', fontSize: '0.8rem', fontWeight: 'bold', color: '#888', textTransform: 'uppercase' }}>
+              {t.security_section || (lang === 'ht' ? 'Sekirite ak Kont' : 'Security & Account')}
+            </div>
+            <div className="settings-section" style={{ background: 'var(--white)', borderRadius: '15px', marginBottom: '25px', overflow: 'hidden' }}>
+
+              {/* Email reveal row (kept from before) */}
+              <div
+                className="settings-item"
+                onClick={() => setShowEmail(!showEmail)}
+                style={{ padding: '15px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', borderBottom: '1px solid var(--pink-light)' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
                   <i className="fas fa-envelope" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
                   <div>
                     <span style={{ fontWeight: 500, display: 'block' }}>{lang === 'ht' ? 'Imèl mwen' : 'My Email'}</span>
                     <span style={{ fontSize: '0.85rem', color: '#888', fontFamily: 'monospace' }}>
-                      {showEmail ? user.email : '••••••••' + user.email.substring(user.email.indexOf('@'))}
+                      {showEmail ? user.email : '••••••••' + (user.email || '').substring((user.email || '').indexOf('@'))}
                     </span>
                   </div>
                 </div>
                 <i className={`fas ${showEmail ? 'fa-eye-slash' : 'fa-eye'}`} style={{ color: 'var(--pink-primary)', fontSize: '1rem' }}></i>
+              </div>
+
+              {/* Verify email row (NEW) */}
+              <div className="settings-item" style={{ padding: '15px 20px', display: 'flex', flexDirection: 'column', gap: '12px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-shield-halved" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <div>
+                      <span style={{ fontWeight: 500, display: 'block' }}>{t.verify_email_title || 'Verify your email'}</span>
+                      <span style={{ fontSize: '0.78rem', fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: user?.profile?.email_verified ? '#00c853' : '#ff6d00' }}>
+                        {user?.profile?.email_verified ? (t.verify_email_verified || 'Verified') : (t.verify_email_unverified || 'Not verified')}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-auth"
+                    onClick={handleSendVerifyEmail}
+                    disabled={isVerifyingEmail || user?.profile?.email_verified}
+                    style={{ padding: '6px 12px', fontSize: '0.75rem', borderRadius: '14px', background: user?.profile?.email_verified ? 'transparent' : 'var(--pink-primary)', color: user?.profile?.email_verified ? '#888' : '#fff', border: '1.5px solid ' + (user?.profile?.email_verified ? '#ddd' : 'var(--pink-primary)'), cursor: user?.profile?.email_verified ? 'default' : 'pointer' }}
+                  >
+                    {isVerifyingEmail ? <i className="fas fa-spinner fa-spin"></i> : (t.verify_email_resend || 'Resend')}
+                  </button>
+                </div>
+                {!user?.profile?.email_verified && (
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      placeholder={t.verify_email_token_placeholder || 'Verification token (dev mode)'}
+                      value={verifyEmailToken}
+                      onChange={(e) => setVerifyEmailToken(e.target.value)}
+                      style={{ flex: 1, padding: '8px 10px', fontSize: '0.75rem', fontFamily: 'monospace', borderRadius: '8px', border: '1px solid var(--pink-primary)', background: 'var(--pink-light)', color: 'var(--text-main)' }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-auth"
+                      onClick={handleConfirmVerifyEmail}
+                      disabled={isVerifyingEmail}
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', borderRadius: '14px', width: 'auto' }}
+                    >
+                      {t.verify_email_confirm_btn || 'Confirm'}
+                    </button>
+                  </div>
+                )}
+                {!user?.profile?.email_verified && (
+                  <p style={{ fontSize: '0.72rem', color: '#888', margin: 0, fontStyle: 'italic' }}>
+                    {t.verify_email_banner || 'Please verify your email to unlock all features.'}
+                  </p>
+                )}
+              </div>
+
+              {/* Change password row (NEW) */}
+              <div className="settings-item" style={{ padding: '15px 20px', display: 'flex', flexDirection: 'column', gap: '10px', borderBottom: '1px solid var(--pink-light)' }}>
+                <div
+                  onClick={() => setIsChangePwdOpen(prev => !prev)}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+                  role="button"
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <i className="fas fa-key" style={{ width: '30px', height: '30px', background: 'var(--pink-light)', color: 'var(--pink-primary)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                    <span style={{ fontWeight: 500 }}>{t.change_password_title || 'Change password'}</span>
+                  </div>
+                  <i className={`fas ${isChangePwdOpen ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ color: 'var(--pink-primary)' }}></i>
+                </div>
+                {isChangePwdOpen && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', paddingTop: '8px', animation: 'fadeInUp 0.3s ease' }}>
+                    <input
+                      type="password"
+                      placeholder={t.change_password_current || 'Current password'}
+                      value={changePwdForm.current_password}
+                      onChange={(e) => setChangePwdForm(prev => ({ ...prev, current_password: e.target.value }))}
+                      className="form-control"
+                      autoComplete="current-password"
+                      style={{ fontSize: '0.8rem', padding: '8px 10px' }}
+                    />
+                    <input
+                      type="password"
+                      placeholder={t.change_password_new || 'New password'}
+                      value={changePwdForm.new_password}
+                      onChange={(e) => setChangePwdForm(prev => ({ ...prev, new_password: e.target.value }))}
+                      className="form-control"
+                      autoComplete="new-password"
+                      style={{ fontSize: '0.8rem', padding: '8px 10px' }}
+                    />
+                    <input
+                      type="password"
+                      placeholder={t.change_password_confirm || 'Confirm new password'}
+                      value={changePwdForm.confirm_new_password}
+                      onChange={(e) => setChangePwdForm(prev => ({ ...prev, confirm_new_password: e.target.value }))}
+                      className="form-control"
+                      autoComplete="new-password"
+                      style={{ fontSize: '0.8rem', padding: '8px 10px' }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-action"
+                      onClick={handleChangePassword}
+                      disabled={isChangingPwd}
+                      style={{ padding: '8px 12px', fontSize: '0.8rem', borderRadius: '14px', marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                    >
+                      {isChangingPwd && <i className="fas fa-spinner fa-spin"></i>}
+                      {t.change_password_submit || 'Change password'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Delete account row (NEW) */}
+              <div className="settings-item" style={{ padding: '15px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flex: 1, minWidth: '200px' }}>
+                  <i className="fas fa-trash" style={{ width: '30px', height: '30px', background: 'rgba(255, 45, 85, 0.1)', color: '#ff2d55', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}></i>
+                  <span style={{ fontWeight: 700, color: '#ff2d55' }}>
+                    {t.delete_account_btn || 'Delete my account'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-action"
+                  onClick={handleDeleteAccount}
+                  disabled={isDeletingAccount}
+                  style={{ padding: '8px 14px', fontSize: '0.78rem', borderRadius: '14px', background: '#ff2d55', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}
+                >
+                  {isDeletingAccount && <i className="fas fa-spinner fa-spin"></i>}
+                  <i className="fas fa-trash"></i>
+                  {lang === 'ht' ? 'Efase' : 'Delete'}
+                </button>
+                <p style={{ fontSize: '0.72rem', color: '#888', margin: 0, marginTop: '4px', width: '100%', fontStyle: 'italic' }}>
+                  {t.delete_account_help || 'This cannot be undone.'}
+                </p>
               </div>
             </div>
           </>

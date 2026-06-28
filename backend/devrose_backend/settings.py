@@ -11,21 +11,179 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import functools
+import os
+import socket
+import sys
+import warnings
+
+# python-dotenv is optional — CI / containers often inject env directly.
+# We import here so the actual load_dotenv() call can run AFTER BASE_DIR is
+# defined below (we need BASE_DIR to resolve the .env path).
+try:
+    from dotenv import load_dotenv as _load_dotenv  # noqa: F401
+except ImportError:  # pragma: no cover
+    _load_dotenv = None
+
+try:
+    import dj_database_url  # Postgres URL parser, installed via requirements.txt
+    _HAS_DJ_DB_URL = True
+except ImportError:  # only fires on the Postgres branch below
+    _HAS_DJ_DB_URL = False
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Auto-load .env from the repo root (one level above backend/) so devs don't
+# have to `export $(cat .env | xargs)` every shell. Reads are non-destructive;
+# OS env vars take precedence over the file.
+if _load_dotenv is not None:
+    _load_dotenv(BASE_DIR.parent / '.env')
+
+
+# --------------------------------------------------------------------------
+# Supabase API key naming-convention compat shim (April 2025+).
+#
+# Supabase renamed the project API key system in 2025:
+#   * SUPABASE_ANON_KEY    → SUPABASE_PUBLISHABLE_KEY  (format: sb_publishable_*)
+#   * SUPABASE_SERVICE_KEY → SUPABASE_SECRET_KEY       (format: sb_secret_*)
+#
+# This codebase historically reads ``SUPABASE_SERVICE_KEY`` from
+# ``storage_utils.py``, ``setup_supabase.py``, ``check_supabase.py`` and
+# ``views/healthz.py``. To accept both naming generations without forcing
+# operators to rename their .env, we map the new name onto the legacy
+# one immediately after ``load_dotenv()`` so every later reader sees the
+# same ``SUPABASE_SERVICE_KEY`` value. Setting ``SUPABASE_SERVICE_KEY``
+# explicitly always wins (so legacy envs are not silently overridden).
+# --------------------------------------------------------------------------
+if not os.environ.get('SUPABASE_SERVICE_KEY', '').strip() \
+        and os.environ.get('SUPABASE_SECRET_KEY', '').strip():
+    os.environ['SUPABASE_SERVICE_KEY'] = os.environ['SUPABASE_SECRET_KEY']
+
+
+# ----- Backend mode detection ----------------------------------------------
+# Compute _USE_POSTGRES ONCE near the top so all gating below (SECRET_KEY
+# validation, DEBUG, ALLOWED_HOSTS, USE_TZ, DATABASES) can branch on it
+# consistently. Anything that needs to know "are we pointing at Supabase?"
+# reads this single boolean — never inline os.environ.get on DATABASE_URL.
+_RAW_DB_URL = os.environ.get('DATABASE_URL', '').strip()
+_USE_POSTGRES = bool(_RAW_DB_URL) and _RAW_DB_URL.startswith(
+    ('postgres://', 'postgresql://')
+)
+
+
+# ----------------------------------------------------------------------------
+# Supabase split-URL convention (``DATABASE_URL`` + ``DIRECT_URL``)
+#
+# Supabase's standard "Connection string" UI exposes TWO URLs that follow
+# the Prisma/Drizzle convention:
+#
+#   DATABASE_URL  → Transaction-mode pooler (port 6543) — for runtime.
+#   DIRECT_URL    → Session-mode pooler / direct (port 5432) — for DDL.
+#
+# PgBouncer in transaction mode (port 6543) cannot run multi-statement
+# transactions, which means Django's ``migrate`` / ``makemigrations`` /
+# ``sqlmigrate`` will fail mid-DDL when bound to DATABASE_URL. The classic
+# workaround — temporarily swap DATABASE_URL's port to 5432 for the
+# duration of ``manage.py migrate`` — is operational friction we don't
+# need. Instead we read DIRECT_URL alongside DATABASE_URL and, when the
+# operator runs a DDL command, transparently use DIRECT_URL as the
+# default connection.
+#
+# Detection: sys.argv[1] (or [2] for ``python -O manage.py ...``) is the
+# management command name. If it's one of migrate/makemigrations/sqlmigrate
+# AND DIRECT_URL is set, swap. Otherwise fall through unchanged.
+#
+# If DIRECT_URL is NOT set we behave exactly as before — no behavioural
+# change for operators who only set DATABASE_URL. Opt-in.
+# ----------------------------------------------------------------------------
+_DIRECT_URL_RAW = os.environ.get('DIRECT_URL', '').strip()
+_USE_DIRECT_URL = bool(_DIRECT_URL_RAW) and _DIRECT_URL_RAW.startswith(
+    ('postgres://', 'postgresql://')
+)
+
+# Supabase's canonical DATABASE_URL ships with ``?pgbouncer=true``. That
+# flag is consumed by the *pooler* middleware, not libpq, and
+# dj-database-url forwards unknown query params into ``OPTIONS`` which
+# libpq then rejects with ``invalid connection option 'pgbouncer'``.
+# Strip pooler-only markers before dj-database-url parses the URL. The
+# whitelist is the libpq-recognised connect-string keywords documented at
+# https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS
+_PGBOUNCER_SAFE_QPARAMS = frozenset({
+    'sslmode', 'sslcert', 'sslkey', 'sslrootcert',
+    'connect_timeout', 'application_name', 'options',
+})
+
+def _sanitise_libpq_query_params(url):
+    """Strip ``?pgbouncer=true`` (and other pooler-only markers) from URL."""
+    if '?' not in url:
+        return url
+    base, qs = url.split('?', 1)
+    kept = [
+        kv for kv in qs.split('&')
+        if kv and kv.split('=', 1)[0] in _PGBOUNCER_SAFE_QPARAMS
+    ]
+    return f"{base}?{'&'.join(kept)}" if kept else base
+
+# Sanitise BEFORE any subsequent parser touches the URL.
+_RAW_DB_URL = _sanitise_libpq_query_params(_RAW_DB_URL)
+if _USE_DIRECT_URL:
+    _DIRECT_URL_RAW = _sanitise_libpq_query_params(_DIRECT_URL_RAW)
+
+_MIGRATION_CMDS = frozenset({'migrate', 'makemigrations', 'sqlmigrate'})
+
+def _is_django_migration_command():
+    # ``manage.py <command>`` convention: argv[1] is the command. We also
+    # peek at argv[2] for ``python -O manage.py migrate`` (the -O lands
+    # between python and manage.py). Anything else (daphne, runserver,
+    # check_supabase) keeps DATABASE_URL.
+    for i in (1, 2):
+        if len(sys.argv) > i and sys.argv[i] in _MIGRATION_CMDS:
+            return True
+    return False
+
+_USE_DIRECT_FOR_DEFAULT = _USE_DIRECT_URL and _is_django_migration_command()
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-k-q&n8)hi3^qln50jcmqog9duhg6a%*7qqw@e$e#v3u@al$l6*'
+# In dev (no env override) we fall back to the bundled insecure key. In
+# production the env MUST provide DJANGO_SECRET_KEY — the swap to Supabase
+# is the moment to set this. Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(50))"
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY') or (
+    'django-insecure-k-q&n8)hi3^qln50jcmqog9duhg6a%*7qqw@e$e#v3u@al$l6*'
+)
+if _USE_POSTGRES and SECRET_KEY.startswith('django-insecure-'):
+    # Loud guard: hitting Supabase with the dev key is a security incident.
+    warnings.warn(
+        "DATABASE_URL points at a real database but DJANGO_SECRET_KEY is "
+        "still the dev fallback. Set DJANGO_SECRET_KEY to a 50+ char random "
+        "value (python -c 'import secrets; print(secrets.token_urlsafe(50))') "
+        "before any deploy that talks to a non-dev Supabase project.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Default to True for SQLite-dev. On the Supabase path we flip to False
+# unless the dev explicitly opts in via DJANGO_DEBUG=1.
+DEBUG = _USE_POSTGRES and (
+    os.environ.get('DJANGO_DEBUG', '0').lower() in ('1', 'true', 'yes')
+)
 
-ALLOWED_HOSTS = ['*']
+# ALLOWED_HOSTS: dev path is permissive ['*']; Supabase path is restricted to
+# what's in DJANGO_ALLOWED_HOSTS (comma-separated hostnames). If the env value
+# is empty (user forgot to set it), fall back to ['localhost', '127.0.0.1']
+# rather than Django's default-empty list — the latter locks you out on first
+# inbound request and the failure mode is hard to diagnose from logs.
+if _USE_POSTGRES:
+    _RAW_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').strip()
+    _PARSED = [h.strip() for h in _RAW_HOSTS.split(',') if h.strip()]
+    ALLOWED_HOSTS = _PARSED if _PARSED else ['localhost', '127.0.0.1']
+else:
+    ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -39,11 +197,14 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'rest_framework.authtoken',
+    # 'rest_framework.authtoken',  # Removed: replaced by SimpleJWT (see api/auth/custom.py)
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'channels',
     'api',
 ]
+
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -57,6 +218,16 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# ``X-Authorization`` is shipped alongside ``Authorization`` by the FE
+# axios interceptor (see src/services/api.js) so the preflight must
+# advertise it or the browser silently drops the PATCH request and the
+# user sees ``Network Error`` / "Cannot reach server".
+try:
+    from corsheaders.conf import default_headers as _cors_default_headers
+    CORS_ALLOW_HEADERS = list(_cors_default_headers) + ['x-authorization']
+except Exception:
+    CORS_ALLOW_HEADERS = None
 
 ROOT_URLCONF = 'devrose_backend.urls'
 
@@ -96,18 +267,242 @@ WSGI_APPLICATION = 'devrose_backend.wsgi.application'
 #   - backend/api/routing.py          (URL patterns)
 #   - backend/api/middleware.py       (token auth from query string)
 #   - backend/api/consumers.py        (chat + classroom handlers)
-ASGI_APPLICATION = 'devrose_backend.asgi.application'
-
-
-# Database
+ASGI_APPLICATION = 'devrose_backend.asgi.application'# ----------------------------------------------------------------------
+# Database (Supabase Postgres when DATABASE_URL is set, SQLite otherwise)
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
+#
+# CONCRETE SUPABASE NOTES
+# ------------------------
+# Resolution order:
+#   1. If DATABASE_URL is set AND starts with postgres:// or postgresql://,
+#      the app uses Supabase Postgres via psycopg2-binary. Two pooler
+#      flavours are supported and we autosniff between them:
+#
+#        * Transaction-mode pooler (port 6543, recommended for free tier)
+#          — ~200 simultaneous connections, but each request is wrapped
+#          in a single transaction with NO server-side cursor cache.
+#          Django knobs we flip on:
+#              CONN_MAX_AGE = 0           (connections are recycled per
+#                                         request by PgBouncer)
+#              OPTIONS.DISABLE_SERVER_SIDE_CURSORS = True
+#              ATOMIC_REQUESTS = False    (PgBouncer holds a transaction
+#                                         open during the whole view; an
+#                                         uncaught exception would roll
+#                                         EVERYTHING back including
+#                                         benign reads)
+#
+#        * Session-mode / direct connection (port 5432)
+#          — single connection per Daphne worker. We keep CONN_MAX_AGE
+#          warm so the expensive TLS handshake is reused.
+#
+#      We autosniff the port from the parsed DATABASES['PORT']:
+#        6543 → transaction-mode
+#        5432 → session-mode
+#        other → assume session-mode (safer default) but warn.
+#      Set ``DATABASE_POOL_MODE=transaction|session`` to override.
+#
+#   2. Otherwise SQLite (BASE_DIR/db.sqlite3) — used by devs who haven't
+#      yet provisioned Supabase, and by the test suite.
+#
+# Why dj-database-url: Supabase-generated passwords contain shell-unfriendly
+# characters (often '#', '@', '!' or quoted spaces); a hand-rolled URL split
+# is fragile. dj_database_url uses urllib.parse and the stdlib `unquote` so
+# passwords survive transit intact.
+# _RAW_DB_URL + _USE_POSTGRES are computed at the top of this file (just
+# after BASE_DIR/load_dotenv). All gating logic below reads those values
+# directly; no alias / re-export needed here.
+if _USE_POSTGRES:
+    if not _HAS_DJ_DB_URL:
+        # Fail fast: DATABASE_URL points at Postgres but dj_database_url is
+        # missing. Silently falling back to SQLite here would write prod
+        # data into a local file. Raise clearly so the deploy fails loudly.
+        raise RuntimeError(
+            "DATABASE_URL is set to a Postgres URL but dj_database_url is "
+            "not installed. Install requirements.txt and restart, or unset "
+            "DATABASE_URL to fall back to SQLite."
+        )
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    # If DIRECT_URL is configured AND we're running a DDL command, use it
+    # for the default DB. Otherwise stick with DATABASE_URL (the pooler).
+    # Belt + braces: the DIRECT_URL probed below gives ``check_supabase``
+    # a non-default side channel to ping when that flow needs to confirm
+    # DDL support.
+    _ACTIVE_DB_URL = _DIRECT_URL_RAW if _USE_DIRECT_FOR_DEFAULT else _RAW_DB_URL
+
+    # Resolve pool mode BEFORE we set conn_max_age so the two choices stay
+    # consistent (transaction-mode requires CONN_MAX_AGE=0; session-mode
+    # benefits from CONN_MAX_AGE>0).
+    _PARSE_URL = dj_database_url.parse(_ACTIVE_DB_URL)
+    _PARSE_URL_PORT = int(_PARSE_URL.get('PORT') or 0)
+    _POOL_MODE_OVERRIDE = os.environ.get('DATABASE_POOL_MODE', '').strip().lower()
+    if _POOL_MODE_OVERRIDE in ('transaction', 'session'):
+        _POOL_MODE = _POOL_MODE_OVERRIDE
+    elif _PARSE_URL_PORT == 6543:
+        _POOL_MODE = 'transaction'
+    elif _PARSE_URL_PORT == 5432:
+        _POOL_MODE = 'session'
+    else:
+        # Unknown port (custom Postgres host) — default to session mode
+        # which is the safer fallback (long-lived connections, prepared
+        # statements cached). User can override via DATABASE_POOL_MODE.
+        _POOL_MODE = 'session'
+        warnings.warn(
+            f"Supabase-style DATABASE_URL detected on unknown port "
+            f"{_PARSE_URL_PORT} — assuming session-mode pooling. Override "
+            "with DATABASE_POOL_MODE=transaction|session if your provider "
+            "uses PgBouncer transaction mode on this port.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Transaction-mode pooler forces CONN_MAX_AGE=0; session-mode keeps
+    # connections warm across ASGI workers.
+    _CONN_MAX_AGE = 0 if _POOL_MODE == 'transaction' else 60
+    _PG_CFG = dj_database_url.parse(_RAW_DB_URL, conn_max_age=_CONN_MAX_AGE)
+    _PG_CFG['ENGINE'] = 'django.db.backends.postgresql'
+    _PG_CFG.setdefault('OPTIONS', {})
+    # Supabase rejects non-SSL connections; sslmode=require matches both the
+    # pooler and the direct connection without pulling in a CA bundle.
+    _PG_CFG['OPTIONS'].update({'sslmode': 'require', 'connect_timeout': 10})
+
+    # IPv4-forced host resolution (workaround for Supabase free-tier direct
+    # connection, which publishes an AAAA-only DNS record).
+    #
+    # Problem: `db.PROJECT.supabase.co` for free-tier projects often returns
+    # ONLY an AAAA (IPv6) record. libpq reads that record first and tries to
+    # bind a v6 socket. On an IPv4-only host (most local dev machines and
+    # any IPv6-disabled container), the kernel rejects the bind with
+    # EADDRNOTAVAIL ("Cannot assign requested address") before libpq falls
+    # back to A records. psycopg2 surfaces this as
+    # `django.db.utils.OperationalError: connection to server at "..." failed:
+    # Cannot assign requested address`.
+    #
+    # Fix: when the configured HOST is *not* already a numeric IP, look up
+    # the AF_INET (v4) address explicitly and replace the HOST entry with
+    # that numeric string. psycopg2/libpq then uses it verbatim and never
+    # queries DNS for an AAAA. If the AF_INET lookup fails (e.g. project
+    # with both A + AAAA, or pooler hostname on dual-stack), we leave the
+    # original hostname untouched so the OS resolver can do its thing.
+    _HOST = _PG_CFG.get('HOST')
+    if _HOST:
+        # Module-level memoization so the warn fires once per process
+        # (manage.py check/migrate/runserver all import settings.py; without
+        # this the AAAA-only message would spam every invocation).
+        @functools.lru_cache(maxsize=64)
+        def _resolve_v4(host, port):
+            """
+            Return the first IPv4 address for ``host``, or None.
+            Token ``v4_record_missing`` is appended to the caller warning
+            so log scrapers can grep for hosts hitting the AAAA-only path
+            without parsing natural-language prose.
+            """
+            try:
+                infos = socket.getaddrinfo(host, port, socket.AF_INET)
+                return infos[0][4][0] if infos else None
+            except socket.gaierror:
+                return None
+
+        try:
+            socket.inet_aton(_HOST)  # raises if _HOST is a hostname, not IP
+            _v4 = None  # already a numeric address; no resolution needed
+        except OSError:
+            _v4 = _resolve_v4(_HOST, _PG_CFG.get('PORT') or 5432)
+
+        if _v4:
+            _PG_CFG['HOST'] = _v4
+        elif not _v4 and _HOST:
+            # AAAA-only host (numeric v6 literal also lands here, since
+            # inet_aton rejects v6). Supabase free-tier Direct connection
+            # (port 5432) publishes ONLY an AAAA record on the public
+            # internet — libpq tries to bind a v6 socket that doesn't
+            # exist on IPv4-only hosts → EADDRNOTAVAIL. The Supabase
+            # Transaction-mode POOLER (port 6543) is dual-stack and
+            # reachable from v4-only clients; switch DATABASE_URL to that
+            # copy of the connection string. The token `v4_record_missing`
+            # in the message is a stable grepable handle for log scrapers.
+            warnings.warn(
+                f"Supabase host {_HOST!r} returned no IPv4 (A) DNS record "
+                "visible from this host — v4_record_missing — the free-tier "
+                "Direct connection (port 5432) is IPv6-only. Switch "
+                "DATABASE_URL to the Supabase Transaction-mode POOLER (port "
+                "6543) — its hostname is dual-stack and reachable from "
+                "IPv4-only clients. (Find it under Supabase dashboard → "
+                "Project Settings → Database → Connection string → "
+                "Transaction.)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    # PgBouncer / Supabase transaction-mode compatibility: opt out of
+    # server-side cursors (prepared statement cache) so the pooler doesn't
+    # crash on statements it can't route across clients.
+    #
+    # IMPORTANT: ``DISABLE_SERVER_SIDE_CURSORS`` is a Django-level setting
+    # (read from the top-level DATABASES dict), NOT a libpq connection
+    # option. If it's erroneously placed inside ``OPTIONS`` Django spreads
+    # it as a ``**kwargs`` argument into ``psycopg2.connect(dsn, **OPTIONS)``
+    # and libpq rejects it with ``invalid connection option
+    # 'DISABLE_SERVER_SIDE_CURSORS'``. The Django docs place it next to
+    # ENGINE / NAME / OPTIONS, not nested inside OPTIONS (see
+    # https://docs.djangoproject.com/en/5.2/ref/databases/#transaction-pooling-mode).
+    _PG_CFG['DISABLE_SERVER_SIDE_CURSORS'] = True
+
+    # PgBouncer transaction-mode + ATOMIC_REQUESTS=True is a footgun: the
+    # pooler holds the connection for the duration of the view's
+    # transaction, so an uncaught exception rolls back EVERY read-or-write
+    # in that view (including unrelated serializer queries). We disable
+    # ATOMIC_REQUESTS for transaction-mode deployments and recommend
+    # wrapping critical sections explicitly with ``@transaction.atomic``
+    # instead. Session-mode keeps ATOMIC_REQUESTS=True for crash-safety.
+    if _POOL_MODE == 'transaction':
+        _PG_CFG['ATOMIC_REQUESTS'] = False
+    else:
+        _PG_CFG['ATOMIC_REQUESTS'] = True
+
+    DATABASES = {'default': _PG_CFG}
+    # Surface the pool-mode decision so ``manage.py check`` and the healthz
+    # endpoint can report it without re-deriving it from the URL.
+    SUPABASE_POOL_MODE = _POOL_MODE
+
+    # Side-channel: parse DIRECT_URL once so ``check_supabase`` and
+    # ``/api/healthz/`` can probe the DDL-side connection without Django
+    # trying to migrate it (we explicitly do NOT add it to the DATABASES
+    # dict — that would invite ``migrate`` to create tables there too).
+    SUPABASE_DIRECT_URL_SET = _USE_DIRECT_URL
+    if _USE_DIRECT_URL:
+        _DIRECT_CFG = dj_database_url.parse(_DIRECT_URL_RAW)
+        _DIRECT_CFG['ENGINE'] = 'django.db.backends.postgresql'
+        _DIRECT_CFG.setdefault('OPTIONS', {})
+        _DIRECT_CFG['OPTIONS'].update(
+            {'sslmode': 'require', 'connect_timeout': 10}
+        )
+        _DIRECT_CFG.pop('CONN_MAX_AGE', None)
+        _DIRECT_CFG.pop('CONN_HEALTH_CHECKS', None)
+        _DIRECT_CFG['DISABLE_SERVER_SIDE_CURSORS'] = True  # safe for both pool modes
+        SUPABASE_DIRECT_DB_CONFIG = _DIRECT_CFG
+        SUPABASE_DIRECT_HOST = _DIRECT_CFG.get('HOST')
+        SUPABASE_DIRECT_PORT = int(_DIRECT_CFG.get('PORT') or 0)
+    else:
+        SUPABASE_DIRECT_DB_CONFIG = None
+        SUPABASE_DIRECT_HOST = None
+        SUPABASE_DIRECT_PORT = None
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
-}
+    SUPABASE_POOL_MODE = None  # SQLite — pool-mode concept doesn't apply.
+    SUPABASE_DIRECT_URL_SET = False
+    SUPABASE_DIRECT_DB_CONFIG = None
+    SUPABASE_DIRECT_HOST = None
+    SUPABASE_DIRECT_PORT = None
+
+# Postgres-friendly BigAutoField (SQLite auto-increment is integer; on
+# Postgres we want bigint for forward-scaling). Migration 0001 still uses
+# the platform default, so this only affects FUTURE migrations.
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Password validation
@@ -138,7 +533,11 @@ TIME_ZONE = 'UTC'
 
 USE_I18N = True
 
-USE_TZ = False
+# USE_TZ: True on Postgres (DRF renders ISO-8601 with 'Z' suffix; React's
+# `new Date()` parses deterministically). False on SQLite so existing
+# stored naive datetimes round-trip without RuntimeWarnings. Single
+# source of truth — every gating section in this file reads _USE_POSTGRES.
+USE_TZ = _USE_POSTGRES
 
 
 # Static files (CSS, JavaScript, Images)
@@ -146,16 +545,32 @@ USE_TZ = False
 
 STATIC_URL = 'static/'
 
+# STATIC_ROOT is required for ``manage.py collectstatic`` on cloud
+# deploys (Render / Railway / Fly / Heroku). Without it, collectstatic
+# fails with: ``STATIC_ROOT must be an existing directory``. We keep it
+# OUTSIDE the repo (BASE_DIR / '..' / 'staticfiles') so it's adjacent
+# to the Vite ``dist/`` build output and a separate ``gitignored``
+# artefact at build time.
+STATIC_ROOT = BASE_DIR.parent / 'staticfiles'
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Default-file-upload behavior — kept as defaults here; ``S3Boto3Storage``
+# integration with Supabase Storage lives in
+# ``backend/api/storage_backends/supabase.py`` and is OFF by default (we
+# still accept base64-in-DB for avatars / audio / images / cover photos
+# to keep the dev path zero-config).
 
 # Increase upload limits for Base64 photos
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760 # 10MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760 # 10MB
 
 REST_FRAMEWORK = {
+    # JWT is the new default authentication (replaced DRF Token). The legacy
+    # CustomTokenAuthentication class is still importable for emergency rollback.
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'api.auth.custom.CustomTokenAuthentication',
+        'api.auth.custom.JwtOnlyAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -171,8 +586,75 @@ REST_FRAMEWORK = {
     },
 }
 
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer"
-    }
+# SimpleJWT settings (replaces DRF built-in Token authentication).
+# - ACCESS token: 60 min (chatty workload — 15 min was too aggressive and
+#   caused idle chat tabs to reconnect via 4401 every ~15 min. Reviewer
+#   note MAJOR#4.)
+# - REFRESH token: 7 days with rotation + blacklist. When the user logs out,
+#   we call /api/logout/ which blacklists the current refresh; stolen refresh
+#   tokens are effectively single-use past rotation.
+from datetime import timedelta
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+
+    # Rotate refresh on every /api/refresh/ call to detect token reuse.
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # Sign with our master Django SECRET_KEY (rotating SECRET_KEY rotates
+    # every outstanding JWT, which is the correct security posture).
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+
+    # Custom claims — keeps the JWT small + readable in dev logs.
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
 }
+
+# ----------------------------------------------------------------------
+# Channel layer (group fan-out for WebSocket consumers)
+#
+# Auto-select:
+#   * If REDIS_URL is set → use channels-redis so 2+ Daphne workers share
+#     group_send() state. Required when scaling beyond a single worker.
+#   * Else → InMemoryChannelLayer (process-local, dev/single-worker).
+#
+# The InMemoryChannelLayer only works for ONE Daphne worker; with 2+
+# workers the chat fabric fragments (a ``group_send`` on Worker A only
+# reaches consumers connected to Worker A). The presence ledger in
+# ``api/presence.py`` ALSO piggy-backs on Redis when REDIS_URL is set —
+# See ``api/presence.py`` for the storage layout (presence:online:{uid},
+# presence:typing:{tid}, presence:room_conn:{room}, …).
+# ----------------------------------------------------------------------
+_REDIS_URL = os.environ.get('REDIS_URL', '').strip() or None
+if _REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [_REDIS_URL],
+                # Capacity per channel — graceful overflow drops the oldest
+                # messages rather than blocking the producer. 1500 is the
+                # upstream default and is plenty for a chat-class workload.
+                "capacity": 1500,
+                # Group-expiry in seconds: messages in a group that don't
+                # get consumed within this window are evicted. 60s is the
+                # upstream default; raise it if you ever ship 1-on-1 calls
+                # over WS groups.
+                "expiry": 60,
+            },
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer"
+        }
+    }
+
+# Expose the choice so ``/api/healthz/`` and ``manage.py check_supabase``
+# can report it without re-reading env. Key shape mirrors
+# ``SUPABASE_POOL_MODE`` so a status page can iterate over all backends.
+REDIS_BACKEND = _REDIS_URL  # None on SQLite/InMemory path, URL string on Redis.
