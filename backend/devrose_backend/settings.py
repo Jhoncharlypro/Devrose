@@ -34,6 +34,35 @@ except ImportError:  # only fires on the Postgres branch below
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# ----------------------------------------------------------------------
+# Part 8 — environment detection
+# ----------------------------------------------------------------------
+# Single source of truth for "which env am I in". Used by:
+#   * preflight management command  (validates DJANGO_ENV)
+#   * /api/version/ endpoint        (returns DJANGO_ENV)
+#   * CACHES selection below        (production uses RedisCache)
+#   * Logging verbosity             (production = WARNING+)
+# Defaults to 'development' when the env is unset so the dev path
+# still works without an .env file. Production deploys MUST set
+# DJANGO_ENV=production to flip the security knobs below.
+DJANGO_ENV = os.environ.get('DJANGO_ENV', 'development').strip().lower()
+if DJANGO_ENV not in ('development', 'staging', 'production'):
+    DJANGO_ENV = 'development'
+
+# App version + commit label (consumed by /api/version/ and the
+# VersionBadge FE component). Set by the deploy pipeline; the
+# default is fine for local dev.
+APP_VERSION = os.environ.get('APP_VERSION', '1.0.0').strip()[:32]
+APP_COMMIT = os.environ.get('GIT_SHA') or os.environ.get('COMMIT_SHA') or ''
+
+# Part 8 — allow operators to opt into maintenance mode via env
+# (useful for "drain traffic" deploys where the load balancer is
+# already routing away). The middleware + the API surface both
+# respect this; the API can override the env flag at runtime.
+MAINTENANCE_MODE_ENABLED = (
+    os.environ.get('MAINTENANCE_MODE_ENABLED', '').lower() in ('1', 'true', 'yes')
+)
+
 # Auto-load .env from the repo root (one level above backend/) so devs don't
 # have to `export $(cat .env | xargs)` every shell. Reads are non-destructive;
 # OS env vars take precedence over the file.
@@ -186,10 +215,41 @@ if _USE_POSTGRES:
         if _RENDER_HOST:
             _PARSED = [_RENDER_HOST, 'localhost', '127.0.0.1']
         else:
-            _PARSED = ['localhost', '127.0.0.1']
+            _PARSED = ['localhost', '127.0.0.1']    # GitHub Codespaces: the public hostname is
+    # ``<slug>-<port>.app.github.dev``. Wildcard on the Postgres path
+    # requires django.core.validators to accept the ``.`` prefix —
+    # append the parent domain so the host validator matches both
+    # the Codespace origin and ``*.app.github.dev``. localtunnel
+    # (``.loca.lt``) added for the same reason on one-off tunnels.
+    _PARSED.extend(['.app.github.dev', '.gitpod.io', '.loca.lt'])
+    # Production deploys: pin the canonical Render frontend / API hostnames
+    # so the Docker image accepts requests from the live domain even when
+    # DJANGO_ALLOWED_HOSTS is unset (e.g. on a freshly provisioned service).
+    _PARSED.extend(['devrose.onrender.com', 'api-devrose.onrender.com'])
     ALLOWED_HOSTS = _PARSED
 else:
-    ALLOWED_HOSTS = ['*']
+    # Dev / SQLite path: keep permissive but also accept Codespace
+    # parent domain + localtunnel so the dev schema validation passes.
+    ALLOWED_HOSTS = ['*', '.app.github.dev', '.gitpod.io', '.loca.lt']    
+
+# ``_filter_regex_patterns`` is defined late here (after CACHES) because
+# both blocks need it; forward declaration would force reload gymnastics.
+def _filter_regex_patterns(patterns):
+    """Drop empties + validate each is a compileable regex."""
+    out = []
+    for p in patterns:
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            _re.compile(p)
+            out.append(p)
+        except _re.error as _e:
+            warnings.warn(
+                f"CORS_ALLOWED_ORIGIN_REGEXES skipped invalid regex {p!r}: {_e}",
+                RuntimeWarning, stacklevel=2,
+            )
+    return out
 
 
 # Application definition
@@ -211,8 +271,61 @@ INSTALLED_APPS = [
     'api',
 ]
 
+# ----- Redis URL resolution -------------------------------------------------
+# Computed ONCE near the top so both:
+#   * the CACHES block below (selects RedisCache vs LocMemCache)
+#   * the CHANNEL_LAYERS block near the end (selects RedisChannelLayer
+#     vs InMemoryChannelLayer)
+# branch on the SAME string. Without this single source of truth,
+# a misconfigured REDIS_URL could yield CACHES=redis + channel=memory
+# which silently fragments the chat fabric on a multi-worker Daphne.
+_REDIS_URL = os.environ.get('REDIS_URL', '').strip() or None
+
+# Part 8 — CACHES (explicit so the spec's "automatic cache
+# invalidation" + "unread counts" + "online status" + "profile
+# cache" can all land on the right backend).
+#
+# Resolution order:
+#   1. REDIS_URL set → django-redis (cross-worker + survives Daphne
+#      restart; the production path). Uses a tiny ``default`` prefix
+#      so the same Redis can host channels-redis keys without
+#      colliding (channels-redis uses its own prefix internally).
+#   2. REDIS_URL unset → LocMemCache (dev / single-worker). The
+#      default is per-process so multi-worker Daphne must set
+#      REDIS_URL or the cache will fragment.
+if _REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _REDIS_URL,
+            'KEY_PREFIX': 'devrose',
+            'TIMEOUT': 300,  # 5 min default; the per-feature code can
+                             # override per-call (e.g. dashboard cards
+                             # use 30s, session revoke uses 0).
+        },
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'devrose-cache',
+            'TIMEOUT': 300,
+        },
+    }
+
+# CACHE_BACKEND is the string form so /api/healthz/ + the version
+# endpoint can report which backend is wired without re-deriving
+# it from the URL.
+CACHE_BACKEND = 'redis' if _REDIS_URL else 'locmem'
+
 
 MIDDLEWARE = [
+    # Part 6: IP block middleware runs FIRST so a banned IP can't
+    # burn compute on JWT validation or password hashing. Defined
+    # in api/middleware.py. X-Forwarded-For-aware with an in-process
+    # 30s TTL cache; skips /api/healthz/ and /api/metrics/ so the
+    # load balancer + Prometheus scraper are never blackholed.
+    'api.middleware.IPBlockMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -221,21 +334,86 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-]
-
-# Production: only allow our Render frontend. Keep as a list so the
+    # Part 8: request-latency sampling for the admin dashboard.
+    # Bounded to 10k samples in a ring buffer; never blocks.
+    'api.middleware.RequestTimingMiddleware',
+    # Part 8: maintenance-mode gate. Reads the active
+    # MaintenanceWindow (cached 5s) and short-circuits writes
+    # with 503. Staff bypass so the admin surface stays usable.
+    'api.middleware.MaintenanceModeMiddleware',
+]# Production: only allow our Render frontend. Keep as a list so the
 # middleware can match exact scheme+host+port. Fall back to permissive
-# when the env var is missing (local dev / CI without CORS_ALLOWED_ORIGINS).
-CORS_ALLOWED_ORIGINS = [
+# when the env var is missing (local dev / CI without CORS_ALLOWED_ORIGINS).# Production deploys: ``devrose.onrender.com`` (frontend) and
+# ``api-devrose.onrender.com`` (backend) are pinned unconditionally so the
+# live FE/BE pair is never locked out by an unset ``CORS_ALLOWED_ORIGINS``
+# env var. Env-supplied origins are merged in below and de-duplicated.
+_DEFAULT_CORS_ORIGINS = [
+    'https://devrose.onrender.com',
+    'https://api-devrose.onrender.com',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://localhost:8000',
+]
+_env_cors = [
     origin.strip()
     for origin in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
     if origin.strip()
-] or [
-    'http://localhost:3000',
-    'http://localhost:8000',
-    'https://devrose.onrender.com',
-    'https://api-devrose.onrender.com',
 ]
+# ``dict.fromkeys`` preserves first-seen order while removing duplicates,
+# so the defaults always win over an accidental env-side repeat.
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(_DEFAULT_CORS_ORIGINS + _env_cors))
+
+# GitHub Codespaces / gitpod-style previews.
+#
+# GitHub Codespace hostnames follow the pattern
+# ``<machine-slug>-<port>.app.github.dev`` — the slug is alphanumeric+dash,
+# the port is typically 3000 (Vite) or 5173 (Vite alt default). Rather than
+# pinning one specific origin we'd have to update every time the codespace
+# is rebuilt, we match the whole family with a regex. Operators hosting
+# their own preview subdomain should add its full origin to
+# ``CORS_ALLOWED_ORIGINS`` above (exact match) — this regex only covers
+# the well-known GitHub-provided preview domain.
+#
+# Note: ``CORS_ALLOWED_ORIGIN_REGEXES`` is a sibling setting to
+# ``CORS_ALLOWED_ORIGINS`` (NOT a replacement) — both lists are honored,
+# and any request matching the regex is treated as allowed. Django-cors-headers
+# applies ``re.match`` (anchored at the start), so the trailing ``$`` is
+# needed to prevent `'a-3000.app.github.dev.evil.com'`` style spoofing.
+#
+# Pattern breakdown:
+#   ^https://                       — exact scheme (Codespaces are HTTPS only)
+#   [a-z0-9-]+                      — machine slug (lowercase, dashes, digits)
+#   -(3000|5173)                    — Codespace exposes a port; we accept
+#                                    Vite's default port (3000) and Vite's
+#                                    alt (5173). Other ports can be added
+#                                    in the operator's own regex override:
+#                                    set CORS_ALLOWED_ORIGIN_REGEXES env.
+#   \.app\.github\.dev$             — Codespace domains only; the trailing
+#                                    $ blocks subdomain spoofing.import re as _re
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'^https://[a-z0-9-]+-(?:3000|5173)\.app\.github\.dev$',
+    # Gitpod previews follow ``https://<port>-<workspace>.gitpod.io``
+    r'^https://(?:3000|5173)-[a-z0-9-]+\.gitpod\.io$',
+    # localtunnel previews (`npx localtunnel --port 8000`). Subdomain is
+    # a random triple-word string localtunnel assigns at start; the
+    # format is always ``<word>-<word>-<word>.loca.lt`` so a single
+    # regex covers any allocated tunnel without operator intervention.
+    # Useful for one-off phone-browser demos against a Codespace where
+    # the operator doesn't want to make the Codespace port public via
+    # the GitHub UI. The dots are properly escaped (``\.loca\.lt``) and
+    # the trailing ``$`` prevents subdomain-spoofing like
+    # ``evil.com#.loca.lt`` from matching.
+    r'^https://[a-z0-9-]+\.loca\.lt$',
+    # Allow env-var overrides (e.g. for custom preview subdomains) without
+    # losing the defaults above. Comma-separated regex strings.
+    *_filter_regex_patterns(os.environ.get('CORS_ALLOWED_ORIGIN_REGEXES', '').split(',')),
+] 
+
+CORS_ALLOW_CREDENTIALS = True  # Required for the FE axios interceptor:
+                               # Authorization header on cross-origin XHR.
+                               # django-cors-headers refuses credentials
+                               # when origin is the literal '*' so the
+                               # implicit fallback below is safe.
 
 # ``X-Authorization`` is shipped alongside ``Authorization`` by the FE
 # axios interceptor (see src/services/api.js) so the preflight must
@@ -596,11 +774,33 @@ REST_FRAMEWORK = {
     # Per-user rate limiting (DRF stores counter in cache; falls back to default
     # memory cache when REDIS_URL isn't configured). Tuned for student chat —
     # 30/min per user is comfortable with AI helpers but still stops runaway loops.
+    #
+    # Part 4 production hardening scopes (merged here so
+    # ScopedRateThrottle picks them up — they must live in
+    # DEFAULT_THROTTLE_RATES, NOT a custom top-level dict, otherwise
+    # they are dead code):
+    #
+    #   * user       - chatty reads / writes / messages (30/min/user)
+    #   * auth_attempt - login / signup / password endpoints (5/min)
+    #   * pre_attach - block / mute / archive / pin writes (30/min)
+    #   * heavy_io   - global search / enumeration endpoints (15/min)
+    #   * audit_read - staff reading the audit ledger (60/min)
+    #   * anon_probe - anonymous uptime probes like /api/healthz/ (30/min)
+    #
+    # Apply a scope on a view by setting ``throttle_classes = [ScopedRateThrottle]``
+    # and ``throttle_scope = 'auth_attempt'`` (or whichever scope name).
+    # All unspecified endpoints keep the default ``user`` rate above.
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'user': '30/min',
+        'auth_attempt': '5/min',
+        'pre_attach': '30/min',
+        'heavy_io': '15/min',
+        'audit_read': '60/min',
+        'anon_probe': '30/min',
     },
 }
 
@@ -676,3 +876,52 @@ else:
 # can report it without re-reading env. Key shape mirrors
 # ``SUPABASE_POOL_MODE`` so a status page can iterate over all backends.
 REDIS_BACKEND = _REDIS_URL  # None on SQLite/InMemory path, URL string on Redis.
+
+# ---------------------------------------------------------------------------
+# Security headers (Part 4 - production hardening).
+#
+# Django's ``SecurityMiddleware`` sets ``X-Content-Type-Options``,
+# ``X-XSS-Protection`` (legacy) and ``Strict-Transport-Security`` (when
+# SECURE_SSL_REDIRECT is True). We add additional knobs on the
+# Postgres path:
+#
+#   SECURE_BROWSER_XSS_FILTER = True             Block reflected XSS (older browsers).
+#   SECURE_CONTENT_TYPE_NOSNIFF = True           Block MIME-sniff.
+#   SECURE_REFERRER_POLICY = 'same-origin'       Don't leak URLs to 3rd parties.
+#   SESSION_COOKIE_SECURE = True                 session cookies over HTTPS only.
+#   CSRF_COOKIE_SECURE   = True                  CSRF tokens over HTTPS only.
+#   X_FRAME_OPTIONS       = 'DENY'               NEVER embed the API in an iframe.
+#
+# We flip these on automatically when ``_USE_POSTGRES`` is true
+# (i.e. we're talking to a real Supabase project, not the dev SQLite
+# path). On the dev path we leave them loose so local browsers
+# don't 404 on HSTS or reject secure-only cookies.
+#
+# On the Postgres path, ENABLE_SSL_REDIRECT can be opted-out (e.g.
+# behind a TLS-terminating LB) by setting DJANGO_SECURE_SSL_REDIRECT=0.
+# ---------------------------------------------------------------------------
+if _USE_POSTGRES:
+    # SECURE_BROWSER_XSS_FILTER was removed from Django 4.0+ SecurityMiddleware
+    # (the X-XSS-Protection header is ignored by modern browsers). We
+    # intentionally don't set it here to avoid the deprecation footgun.
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = 'same-origin'
+    X_FRAME_OPTIONS = 'DENY'
+    SECURE_SSL_REDIRECT = os.environ.get('DJANGO_SECURE_SSL_REDIRECT', '1').lower() in (
+        '1', 'true', 'yes',
+    )
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # HSTS: 1 year, includeSubDomains. preload-listeligible: we leave
+    # preload out by default — many operators don't want to commit to
+    # the global preload list.
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = False
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+else:
+    SECURE_CONTENT_TYPE_NOSNIFF = False
+    SECURE_REFERRER_POLICY = 'same-origin'
+    X_FRAME_OPTIONS = 'SAMEORIGIN'
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False

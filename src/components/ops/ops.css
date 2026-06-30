@@ -1,0 +1,245 @@
+/* ---------------------------------------------------------------------------
+ * ops.css — Part 8 Production / DevOps surface
+ *
+ * Three small UI surfaces:
+ *   .ops-banner     — full-width maintenance notice, slides in from top
+ *   .ops-health     — small status dot + dropdown with component details
+ *   .ops-version    — env+version+SHA badge for the header
+ *
+ * Reuses CSS custom properties from src/styles/index.css so light/dark
+ * mode is automatic.
+ * --------------------------------------------------------------------------- */
+
+.ops-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  padding: 0.75rem 1.25rem;
+  font-size: 0.9rem;
+  color: #fff;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
+  animation: ops-banner-slide 0.35s ease-out;
+}
+.ops-banner--critical {
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+}
+.ops-banner--warn {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+}
+@keyframes ops-banner-slide {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.ops-banner__inner {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+.ops-banner__icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ops-banner__body { flex: 1; min-width: 0; }
+.ops-banner__title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 0.15rem;
+}
+.ops-banner__message {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  opacity: 0.95;
+}
+.ops-banner__ends {
+  margin-left: 0.5rem;
+  opacity: 0.85;
+}
+.ops-banner__close {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+.ops-banner__close:hover { background: rgba(255, 255, 255, 0.25); }
+.ops-banner__close:active { transform: scale(0.95); }
+.kot3-reduce-motion .ops-banner { animation: none; }
+.kot3-reduce-motion .ops-banner__close { transition: none; }
+
+/* ---- health indicator ---- */
+.ops-health {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.ops-health__dot {
+  appearance: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0.4rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.ops-health__dot:hover { background: rgba(15, 23, 42, 0.06); }
+.ops-health__dot:active { transform: scale(0.92); }
+.ops-health__dot--ok { color: #16a34a; }
+.ops-health__dot--degraded { color: #f59e0b; }
+.ops-health__dot--down { color: #ef4444; }
+.ops-health__dot--unknown { color: #94a3b8; }
+.ops-health__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.ops-health__panel {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  min-width: 220px;
+  background: var(--bg-secondary, #ffffff);
+  color: var(--text-primary, #0f172a);
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+  padding: 0.75rem 0.9rem;
+  font-size: 0.85rem;
+  z-index: 1000;
+  animation: ops-health-fade 0.15s ease-out;
+}
+@keyframes ops-health-fade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ops-health__title {
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+.ops-health__list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.ops-health__list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.35rem;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.04);
+}
+.ops-health__list li[data-ok="1"] { background: rgba(22, 163, 74, 0.1); color: #166534; }
+.ops-health__list li[data-ok="0"] { background: rgba(239, 68, 68, 0.1); color: #b91c1c; }
+.ops-health__name { font-weight: 600; text-transform: capitalize; }
+.ops-health__value { font-family: monospace; }
+.ops-health__warning,
+.ops-health__error {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  margin: 0.25rem 0;
+}
+.ops-health__warning {
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+.ops-health__error {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+.ops-health__footer {
+  font-size: 0.72rem;
+  color: var(--text-tertiary, #94a3b8);
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-color, #e2e8f0);
+}
+.kot3-reduce-motion .ops-health__panel { animation: none; }
+.kot3-reduce-motion .ops-health__dot { transition: none; }
+.kot3-high-contrast .ops-health__panel { border-width: 2px; }
+
+/* ---- version badge ---- */
+.ops-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--text-tertiary, #94a3b8);
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.05);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ops-version__env {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+.ops-version--dev .ops-version__env { background: #dbeafe; color: #1e40af; }
+.ops-version--staging .ops-version__env { background: #fef3c7; color: #b45309; }
+.ops-version--prod .ops-version__env { background: #dcfce7; color: #166534; }
+.ops-version--unknown .ops-version__env { background: #e2e8f0; color: #475569; }
+.ops-version--error { background: rgba(239, 68, 68, 0.12); color: #b91c1c; }
+.ops-version--loading { color: var(--text-tertiary, #94a3b8); }
+.ops-version__sep { opacity: 0.4; }
+.ops-version__sha { opacity: 0.7; }
+
+/* ---- dark mode ---- */
+@media (prefers-color-scheme: dark) {
+  .ops-health__panel {
+    --bg-secondary: #1e293b;
+    --text-primary: #f1f5f9;
+    --text-tertiary: #94a3b8;
+    --border-color: #334155;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  }
+  .ops-health__list li { background: rgba(255, 255, 255, 0.05); }
+  .ops-version { background: rgba(255, 255, 255, 0.06); }
+  .ops-version--dev .ops-version__env { background: rgba(30, 64, 175, 0.4); color: #93c5fd; }
+  .ops-version--staging .ops-version__env { background: rgba(180, 83, 9, 0.4); color: #fcd34d; }
+  .ops-version--prod .ops-version__env { background: rgba(22, 101, 52, 0.4); color: #86efac; }
+}
+
+/* ---- responsive ---- */
+@media (max-width: 640px) {
+  .ops-banner__inner { flex-wrap: wrap; }
+  .ops-banner__close { margin-left: auto; }
+  .ops-health__panel { right: -1rem; }
+  .ops-version { font-size: 0.65rem; }
+}

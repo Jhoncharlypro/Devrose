@@ -567,7 +567,7 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
                 # Pre-aggregate reaction rows so the inner
                 # MessageSerializer doesn't issue a per-row query for
                 # an N+1 fan-out on every send_message event.
-                from ..serializers.chat import (
+                from api.serializers.chat import (
                     MessageSerializer as MsgSerializer,
                     _build_reactions_context,
                 )
@@ -935,7 +935,7 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             )
             target.updated_at = new.created_at
             target.save(update_fields=['updated_at'])
-            from ..serializers.chat import (
+            from api.serializers.chat import (
                 MessageSerializer as MsgSerializer,
                 _build_reactions_context,
             )

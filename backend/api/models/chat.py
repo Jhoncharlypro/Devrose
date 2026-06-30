@@ -102,8 +102,34 @@ class Message(models.Model):
     )
     forward_sender_name = models.CharField(max_length=150, blank=True, default='')
 
+    # Part 5 (disappearing messages): ``expires_at`` is NULL for normal
+    # messages and set for ephemeral ones. The management command
+    # ``cleanup_expired`` sweeps rows whose ``expires_at`` is in the
+    # past on a periodic cron. The composite index on
+    # (expires_at, created_at) keeps that sweep an O(matches) scan
+    # rather than a full table scan even on million-row message
+    # tables. ``is_ephemeral`` is a denormalized boolean so the chat
+    # consumer can hide the "Sent" tick + add a "disappearing" pill
+    # without a comparison against NULL.
+    expires_at = models.DateTimeField(null=True, blank=True)
+    is_ephemeral = models.BooleanField(
+        default=False,
+        help_text='True for messages with an expires_at deadline. Lets the '
+                  'FE show a "disappearing" badge without a NULL check.',
+    )
+
     class Meta:
         ordering = ['created_at']
+        indexes = [
+            # Janitor's hot scan: WHERE expires_at < now() AND is_ephemeral
+            # ORDER BY expires_at. Composite index on (is_ephemeral,
+            # expires_at) makes this a single B-tree walk; the
+            # ``created_at`` index is kept for the default ordering.
+            models.Index(
+                fields=['is_ephemeral', 'expires_at'],
+                name='msg_ephemeral_idx',
+            ),
+        ]
 
     def __str__(self):
         return f"Msg {self.id} by {self.sender.username}"

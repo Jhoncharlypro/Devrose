@@ -65,6 +65,12 @@ export const THEMES = [
   { id: 'dusk',            label: 'Dusk Lavender',    emoji: '🌌', accent: '#b366ff', bg: 'linear-gradient(135deg,#201a30 0%,#13101c 50%,#b366ff 100%)', isLight: false },
   // ─── AMOLED: pure-black CSS block in kot3chat.css ──────────────────────
   { id: 'amoled',          label: 'AMOLED Black',     emoji: '⬛', accent: '#bb86fc', bg: 'linear-gradient(135deg,#000000 0%,#0a0a0a 50%,#bb86fc 100%)', isLight: false, isAmoled: true },
+  // ─── Premium Messenger Home — 5 new themes (so we reach 16 visually distinct palettes) ───
+  { id: 'whatsapp',        label: 'WhatsApp Green',      emoji: '🟢', accent: '#25d366', bg: 'linear-gradient(135deg,#0b141a 0%,#111b21 50%,#25d366 100%)', isLight: false },
+  { id: 'instagram',       label: 'Instagram Gradient', emoji: '🟣', accent: '#e1306c', bg: 'linear-gradient(45deg,#f09433 0%,#dc2743 50%,#bc1888 100%)', isLight: true },
+  { id: 'cyberpunk',       label: 'Cyberpunk Neon',     emoji: '⚡', accent: '#00f5d4', bg: 'linear-gradient(135deg,#0d0221 0%,#00f5d4 50%,#ff206e 100%)', isLight: false },
+  { id: 'rose-pink',       label: 'Rose Pink',           emoji: '🌷', accent: '#ff4d8d', bg: 'linear-gradient(135deg,#fff5f8 0%,#ff4d8d 100%)', isLight: true },
+  { id: 'minimal',         label: 'Minimal White',       emoji: '⬜', accent: '#111111', bg: 'linear-gradient(180deg,#ffffff,#ffffff)', isLight: true },
   // ─── System: sentinel — resolved at runtime via matchMedia ─────────────
   { id: 'system',          label: 'System',           emoji: '🖥️', accent: 'auto',     bg: 'linear-gradient(135deg,#242526 0%,#ffffff 50%,#0084ff 100%)',          isLight: 'auto', isSystem: true },
   // ─── Custom: sentinel — base palette resolved like System + accent overlay

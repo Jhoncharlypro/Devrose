@@ -45,6 +45,7 @@ import SkeletonCard from './components/SkeletonCard';
 import ClassroomView from './components/ClassroomView';
 import LiveClassroom from './components/LiveClassroom';
 import Kot3Chat from './components/Kot3Chat';
+import Kot3ChatDesktop from './components/kot3chat/Kot3ChatDesktop';
 import { translations } from './data/translations';
 import { courseService, authService, sessionService, progressService, profileService, favoriteService, chatService, clearTokenPair, broadcastLogout, isSupabaseSessionActive } from './services/api';
 import { getSupabase, getSupabaseSession, isSupabaseConfigured } from './services/supabase';
@@ -586,10 +587,13 @@ function App() {
         );
       case 'kot3chat':
         return (
-          <Kot3Chat 
-            lang={lang} 
-            user={user} 
+          <Kot3ChatDesktop
+            lang={lang}
+            user={user}
             showToast={showToast}
+            translations={translations}
+            onLogout={handleLogout}
+            onOpenSettings={() => setIsSettingsOpen(true)}
           />
         );
       case 'rules':

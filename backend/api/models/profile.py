@@ -142,6 +142,15 @@ class Profile(models.Model):
     # ISO-3166 shortname from COUNTRIES. Empty string is allowed.
     country = models.CharField(max_length=60, blank=True, default='')
 
+    # ---- Part 5 (premium subscription flags) ----
+    # ``is_premium`` is a hot-path boolean; ``premium_until`` is the
+    # expiry. The two together drive every "show the premium badge?"
+    # decision in the FE without an extra JOIN. PremiumSubscription is
+    # the HISTORY table — see models/part5.py. We flip both in a
+    # single save() when activate/cancel fires (see views/part5.py).
+    is_premium = models.BooleanField(default=False)
+    premium_until = models.DateTimeField(null=True, blank=True)
+
     def __str__(self):
         return f"Profile for {self.user.username}"
 

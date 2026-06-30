@@ -67,6 +67,7 @@ from django.db import IntegrityError
 from django.db.models import Count, Q
 
 from api.models import Profile, ChatThread, Message, BlockedUser, MutedUser
+from api.models.part6 import LoginAttempt, UserSession
 from api.serializers import UserSerializer
 
 User = get_user_model()
@@ -289,6 +290,86 @@ def _issue_tokens(user):
 
 
 # ----------------------------------------------------------------------
+# Part 6 audit hooks — login attempts + per-device sessions.
+#
+# Every login (success or failure) writes a ``LoginAttempt`` row so the
+# Admin Dashboard's "Failed Login Attempts" card has real data. On a
+# successful login we ALSO open a ``UserSession`` keyed by the refresh
+# token's JTI so the Security Center can list active devices and
+# "Force logout all" (or "this device only") can revoke a specific JTI
+# without invalidating every other session.
+# ----------------------------------------------------------------------
+def _client_ip(request):
+    """Best-effort IP extraction: trust X-Forwarded-For first hop if present."""
+    fwd = (request.META.get('HTTP_X_FORWARDED_FOR') or '').strip()
+    if fwd:
+        # Left-most is the originating client per RFC 7239 conventions.
+        return fwd.split(',', 1)[0].strip()[:64] or '0.0.0.0'
+    return (request.META.get('REMOTE_ADDR') or '0.0.0.0')[:64]
+
+
+def _client_user_agent(request):
+    return (request.META.get('HTTP_USER_AGENT') or '')[:512]
+
+
+def _record_login_attempt(
+    *,
+    username,
+    user=None,
+    success,
+    failure_reason='',
+    request=None,
+):
+    """
+    Persist a ``LoginAttempt`` row for the Admin Dashboard.
+
+    Wrapped in ``try/except`` so a DB hiccup never breaks the auth
+    response — login is the hottest endpoint, the audit row is best-effort.
+    The ``username`` slot always reflects what the user typed (not the
+    resolved user) so the Security Center can show a "wrong-password
+    probe" pattern even when the username doesn't exist.
+    """
+    try:
+        ip = _client_ip(request) if request is not None else ''
+        ua = _client_user_agent(request) if request is not None else ''
+        LoginAttempt.objects.create(
+            user=user if (success and user) else None,
+            username=(username or '')[:255],
+            ip_address=ip[:64],
+            user_agent=ua[:512],
+            success=bool(success),
+            failure_reason=(failure_reason or '')[:64],
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning('record_login_attempt failed: %s', e)
+
+
+def _open_user_session(*, user, refresh_token, request):
+    """
+    Create a ``UserSession`` row keyed by the refresh JWT's JTI claim.
+
+    Returns the new ``UserSession`` (or ``None`` on best-effort failure).
+    ``force_logout`` later revokes by JTI, so the Security Center's
+    "Force logout all devices" only needs to flip ``is_active`` on every
+    active row for the target user -- no need to rotate the signing key.
+    """
+    try:
+        jti = refresh_token.get('jti') or ''
+        if not jti:
+            return None
+        return UserSession.objects.create(
+            user=user,
+            jti=str(jti)[:64],
+            device_label=(request.data.get('device_label') or '')[:120] if request is not None else '',
+            ip_address=_client_ip(request) if request is not None else '',
+            user_agent=_client_user_agent(request) if request is not None else '',
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning('open_user_session failed for uid=%s: %s', user.id, e)
+        return None
+
+
+# ----------------------------------------------------------------------
 # Public endpoints
 # ----------------------------------------------------------------------
 @api_view(['GET'])
@@ -460,10 +541,25 @@ def login(request):
         try:
             access, refresh, user = _django_login_response(email, password)
         except ValueError:
+            _record_login_attempt(
+                username=email, user=None, success=False,
+                failure_reason='invalid_credentials', request=request,
+            )
             return Response(
                 {'error': 'Invalid Credentials'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        _record_login_attempt(
+            username=email, user=user, success=True, request=request,
+        )
+        # Open a UserSession keyed by the refresh JTI so the Security
+        # Center can list/revoke this device later.
+        try:
+            refresh_obj = RefreshToken(refresh)
+        except Exception:
+            refresh_obj = None
+        if refresh_obj is not None:
+            _open_user_session(user=user, refresh_token=refresh_obj, request=request)
         return Response(
             {'access': access, 'refresh': refresh, 'user': UserSerializer(user).data}
         )
@@ -487,6 +583,10 @@ def login(request):
         payload={'email': email, 'password': password},
     )
     if status_code >= 400:
+        _record_login_attempt(
+            username=email, user=None, success=False,
+            failure_reason='supabase_rejected', request=request,
+        )
         return Response({'error': data.get('msg') or data.get('error_description') or 'Invalid Credentials'}, status=status.HTTP_400_BAD_REQUEST)
 
     supabase_user = data.get('user') or {}
@@ -513,6 +613,15 @@ def login(request):
     # the Django User row above, so ``_issue_tokens(user)`` produces a
     # working HS256 pair.
     access, refresh = _issue_tokens(user)
+    _record_login_attempt(
+        username=email, user=user, success=True, request=request,
+    )
+    try:
+        refresh_obj = RefreshToken(refresh)
+    except Exception:
+        refresh_obj = None
+    if refresh_obj is not None:
+        _open_user_session(user=user, refresh_token=refresh_obj, request=request)
     return Response(
         {
             'access': access,
@@ -542,6 +651,17 @@ def logout(request):
     try:
         token = RefreshToken(refresh_str)
         token.blacklist()
+        # Part 6: mark the matching UserSession inactive so the Security
+        # Center's "active devices" count drops immediately. Best-effort
+        # -- if the row doesn't exist (stale token) the UPDATE is a no-op.
+        try:
+            jti = token.get('jti') or ''
+            if jti and request.user.is_authenticated:
+                UserSession.objects.filter(
+                    user=request.user, jti=str(jti)[:64], is_active=True,
+                ).update(is_active=False, revoked_at=timezone.now(), revoked_reason='logout')
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug('logout: session close failed: %s', e)
     except (InvalidToken, TokenError):
         # Stale or malformed token — log but don't fail. The client just
         # needs to drop its copies.

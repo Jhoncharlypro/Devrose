@@ -116,6 +116,7 @@ class _Backend:
     # state with its async surface so we don't need async here at all,
     # but ``RedisBackend`` has TWO clients (one async, one sync).
     def sync_is_online(self, uid: int) -> bool: ...
+    def sync_scard_online_set(self) -> int: ...
     def sync_get_typing(self, thread_id: int) -> List[int]: ...
     def sync_room_count(self, room: str) -> int: ...
     def sync_room_list(self, room: str) -> Dict[str, Dict[str, Any]]: ...
@@ -263,6 +264,11 @@ class LocalMemoryBackend(_Backend):
     def sync_is_online(self, uid):
         with self._lock:
             return bool(self._online.get(uid))
+
+    def sync_scard_online_set(self):
+        """Return the number of users currently online (no SMEMBERS)."""
+        with self._lock:
+            return len(self._online_set)
 
     def sync_username_for(self, uid):
         with self._lock:
@@ -564,6 +570,13 @@ class RedisBackend(_Backend):
     def sync_is_online(self, uid):
         return bool(self._get_sync().exists(self._k_online(uid)))
 
+    def sync_scard_online_set(self):
+        """Cheap count of online users -- one Redis SCARD, no parse."""
+        try:
+            return int(self._get_sync().scard(self._k_online_set()) or 0)
+        except Exception:
+            return 0
+
     def sync_get_typing(self, thread_id, max_age_seconds=4):
         r = self._get_sync()
         key = self._k_typing(thread_id)
@@ -722,6 +735,35 @@ async def ping_async() -> bool:
 def is_online(uid: int) -> bool:
     """Sync-side helper for DRF views. SAFE in non-async contexts."""
     return get_backend().sync_is_online(uid)
+
+
+def count_online() -> int:
+    """
+    Return the total number of users currently online (DRF-side / sync).
+
+    The dashboard's "Online users" card calls this once per 30s refresh.
+    For Redis we use ``SCARD`` on the global online-set (O(1)) instead of
+    iterating ``SMEMBERS`` and counting client-side — the SCARD round-trip
+    is one packet and never deserializes members. For the local-memory
+    backend we read ``len(self._online_set)`` under the same RLock that
+    guards writes, so a torn read is impossible.
+
+    Failures (e.g. Redis briefly unreachable) are swallowed and return
+    ``-1`` so callers can render a "—" placeholder instead of a 500.
+    """
+    try:
+        backend = get_backend()
+        # ``LocalMemoryBackend`` exposes the set directly via
+        # ``_online_set``; ``RedisBackend`` exposes ``sync_scard_online_set``
+        # so we don't have to add a new method on each backend class.
+        if hasattr(backend, 'sync_scard_online_set'):
+            return int(backend.sync_scard_online_set() or 0)
+        # Fallback: if the backend doesn't expose the fast SCARD, return -1
+        # (rendered as "—" on the FE) rather than allocating a Python set.
+        return -1
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("presence.count_online lookup failed")
+        return -1
 
 
 def get_typing(thread_id: int, max_age_seconds: int = 4) -> List[int]:
