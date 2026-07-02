@@ -72,6 +72,11 @@ class ProfileSerializer(serializers.ModelSerializer):
     email_verified_at = serializers.DateTimeField(required=False, read_only=True)
     profile_visibility = serializers.CharField(required=False, allow_blank=True)
     last_seen_visibility = serializers.CharField(required=False, allow_blank=True)
+    # Per-field toggles (0021) — Kot3 Profile single-page privacy console
+    # in ``src/components/kot3/Kot3Profile.jsx`` writes these alongside
+    # the coarse visibility enums.
+    show_contact_info = serializers.BooleanField(required=False)
+    allow_stranger_dms = serializers.BooleanField(required=False)
 
     # Fields added in 0012 (PROFILE module). All optional — privacy-aware
     # updates will skip individual fields the caller didn't want to change.
@@ -101,6 +106,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             'avatar', 'bio', 'status_text',
             'email_verified', 'email_verified_at',
             'profile_visibility', 'last_seen_visibility',
+            'show_contact_info', 'allow_stranger_dms',
             'cover_photo', 'interests', 'social_links',
             'notification_prefs', 'country',
         ]
@@ -241,3 +247,20 @@ class MutedUserSerializer(serializers.ModelSerializer):
             obj.mute_until = new_until
             obj.save(update_fields=['mute_until'])
         return obj
+
+
+class ProfileActivityLogSerializer(serializers.ModelSerializer):
+    """
+    Read-only shape used by ``GET /api/profile/activity/`` and the
+    Activity Timeline UI in ``src/components/kot3/Kot3Profile.jsx``.
+
+    The ``details`` JSONField is passed through as-is so the FE can
+    read action-specific keys (old → new value, viewer_username, etc.)
+    without us having to migrate the schema every time we add a new
+    action type.
+    """
+    class Meta:
+        from api.models import ProfileActivityLog
+        model = ProfileActivityLog
+        fields = ('id', 'action', 'details', 'created_at')
+        read_only_fields = fields

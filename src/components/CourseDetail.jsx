@@ -1,7 +1,7 @@
 import React from 'react';
 import FAQ from './FAQ';
 
-const CourseDetail = ({ course, lang, translations, onBack, onEnroll, isSaved, onToggleSave }) => {
+const CourseDetail = ({ course, lang, translations, onBack, isSaved, onToggleSave }) => {
   const t = translations[lang];
   if (!course) return null;
 
@@ -62,33 +62,25 @@ const CourseDetail = ({ course, lang, translations, onBack, onEnroll, isSaved, o
           {course.description}
         </p>
 
-        <div style={{ background: '#fdf2f7', padding: '20px', borderRadius: '12px', margin: '20px 0' }}>
-          <h3 style={{ color: 'var(--pink-primary)', marginTop: 0 }}>{t.registration_summary}</h3>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-            <span>{t.registration_fee}</span>
-            <span style={{ fontWeight: 'bold', color: 'var(--pink-primary)' }}>${course.price}</span>
+        {/* Phase 10 — no payment forms. The price is shown as
+            informational metadata only. The actual enrollment / payment
+            surface lives in `CourseManager` (the "lòt espas"). */}
+        {course.price != null && (
+          <div style={{ background: '#fdf2f7', padding: '20px', borderRadius: '12px', margin: '20px 0' }}>
+            <h3 style={{ color: 'var(--pink-primary)', marginTop: 0 }}>
+              {t.price_label || 'Price'}
+            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+              <span>{t.explore_price_info || (lang === 'ht' ? 'Pri enskripsyon (referans)' : 'Registration price (reference)')}</span>
+              <span style={{ fontWeight: 'bold', color: 'var(--pink-primary)' }}>${course.price}</span>
+            </div>
+            <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              {t.explore_price_disclaimer || (lang === 'ht'
+                ? 'Kontakte yon admin nan espas jesyon an pou plis enfòmasyon sou enskripsyon.'
+                : 'Contact an admin in the management space for enrollment details.')}
+            </p>
           </div>
-        </div>
-        
-        <p>{t.payment_method}</p>
-        <div id="paypal-button-container" style={{ marginBottom: '20px' }}>
-          <button className="btn-action" style={{ background: '#0070ba' }} onClick={onEnroll}>
-            <i className="fab fa-paypal"></i> Pay with PayPal
-          </button>
-        </div>
-        
-        <hr style={{ margin: '30px 0', border: 0, borderTop: '1px solid #eee' }} />
-        
-        <p dangerouslySetInnerHTML={{ __html: t.local_payment_desc }}></p>
-        <a 
-          href={`https://wa.me/50931234567?text=${encodeURIComponent(`Bonjou, mwen vle enskri nan kou: ${course.title}`)}`} 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="btn-action whatsapp-btn"
-          style={{ background: '#25D366', color: 'white', marginTop: '10px', textDecoration: 'none', display: 'block', textAlign: 'center' }}
-        >
-          <i className="fab fa-whatsapp"></i> <span>{t.enroll_whatsapp}</span>
-        </a>
+        )}
 
         <div style={{ textAlign: 'left', background: 'var(--card-bg)', padding: '25px', borderRadius: '15px', marginTop: '40px', borderLeft: '5px solid var(--pink-primary)', boxShadow: '0 4px 15px rgba(0,0,0,0.05)' }}>
           <h3 style={{ color: 'var(--dark)', marginTop: 0 }}>

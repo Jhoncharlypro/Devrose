@@ -12,7 +12,11 @@
 # (the ``metrics`` function actually lives in ``api/views/metrics.py``).
 # Keep this file purely about models so it stays importable.
 from .chat import (
-    ChatThread, Message, MessageReaction, UserStory,
+    ChatThread, Message, MessageReaction, UserStory, UserThreadSetting,
+    # Phase 10 — Status (Stories) full schema. Each table has its own
+    # constraints + indexes (see chat.py for the rationale of each).
+    StatusMedia, StatusView, StatusReaction, StatusPrivacyOverride,
+    STATUS_PRIVACY_CHOICES,
 )
 from .course import Course
 from .enrollment import Enrollment
@@ -26,7 +30,7 @@ from .live_room import LiveRoom
 # because the original mixed-domain import block above lost those
 # names. Keep them here so callers can still ``from api.models
 # import BlockedUser, MutedUser`` without caring about the file split.
-from .profile import Profile, BlockedUser, MutedUser, COUNTRIES
+from .profile import Profile, BlockedUser, MutedUser, COUNTRIES, ProfileActivityLog
 from .progress import UserProgress
 # SessionMemory was moved into ``session.py`` (it pairs with the
 # ``Session`` per-device user session model) — keep the flat

@@ -114,11 +114,43 @@ api.interceptors.request.use((config) => {
 });
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // X-Maintenance header (set by MaintenanceModeMiddleware on
+    // every read pass-through) signals a read_only maintenance
+    // window. We dispatch a window event so the existing
+    // MaintenanceBanner (and any other listener) can light up
+    // immediately. Listeners de-dupe by window-id so a burst of
+    // GETs doesn't fire N toasts.
+    const maintenance = response.headers?.['x-maintenance'];
+    if (maintenance) {
+      try {
+        window.dispatchEvent(new CustomEvent('devrose:server:maintenance', {
+          detail: {
+            scope: response.headers?.['x-maintenance-scope'] || 'read_only',
+            source: 'response_header',
+          },
+        }));
+      } catch (_) { /* ignore */ }
+    }
+    return response;
+  },
   async (error) => {
     const original = error.config || {};
     const status = error.response?.status;
     const refresh = localStorage.getItem('refresh_token');
+    // 503 with maintenance_mode error body — surface a maintenance
+    // event so the banner can show even when the FE missed the
+    // read pass (e.g. the user just opened a write tab).
+    if (error.response?.status === 503 && error.response?.data?.error === 'maintenance_mode') {
+      try {
+        window.dispatchEvent(new CustomEvent('devrose:server:maintenance', {
+          detail: {
+            scope: error.response.data.scope || 'read_only',
+            source: '503_response',
+          },
+        }));
+      } catch (_) { /* ignore */ }
+    }
 
     // Skip refresh for login/refresh/logout endpoints to avoid infinite loops.
     const skipRefresh =
@@ -361,6 +393,11 @@ export const profileService = {
   getById: (userId) => api.get(`profile/${userId}/`),
   // ISO-3166 catalog for the country dropdown (cached client-side).
   getCountries: () => api.get('profile/countries/'),
+  // Public profile keyed by username (privacy-redacted, includes public_url).
+  // Powers the QR-code share flow + the future /u/<username> share page.
+  getPublicByUsername: (username) => api.get(`profile/u/${encodeURIComponent(username)}/`),
+  // Authenticated user's last 50 profile activity events, newest first.
+  getActivity: () => api.get('profile/activity/'),
 };
 
 export const blocksService = {

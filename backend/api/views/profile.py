@@ -29,6 +29,7 @@ import logging
 from urllib.parse import urlparse
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -36,10 +37,11 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 
-from api.models import COUNTRIES, BlockedUser, MutedUser, Profile
+from api.models import COUNTRIES, BlockedUser, MutedUser, Profile, ProfileActivityLog
 from api.serializers.user import (
     BlockedUserSerializer,
     MutedUserSerializer,
+    ProfileActivityLogSerializer,
     ProfileSerializer,
     UserSerializer,
 )
@@ -47,10 +49,75 @@ from api.serializers.user import (
 logger = logging.getLogger(__name__)
 
 
+# ----------------------------------------------------------------------
+# Activity log helper
+# ----------------------------------------------------------------------
+def record_activity(user, action, details=None):
+    """
+    Append-only helper for ``ProfileActivityLog``. Called from the
+    ``ProfileViewSet.me`` PATCH flow and the public-username route
+    so every privacy change + profile view is captured.
+
+    The function is intentionally fire-and-forget (no exception
+    bubble-up) so a logging failure can never break a write that
+    the user is waiting for. We log at WARNING level if the insert
+    fails so operators still see the issue in Sentry/Datadog.
+    """
+    try:
+        ProfileActivityLog.objects.create(
+            user=user, action=action, details=details or {},
+        )
+    except Exception:
+        logger.warning(
+            'Failed to record profile activity for user_id=%s action=%s',
+            getattr(user, 'id', None), action, exc_info=True,
+        )
+
+
 # Allowed schemed for social_links URLs. We reject javascript:, data:,
 # vbscript: and the empty scheme so a malicious URL can't run script on
 # the contact card.
 _SOCIAL_ALLOWED_SCHEMES = {'http', 'https'}
+
+# Profile-view activity throttle. The activity log is append-only and
+# the FE renders the last 50 entries — without throttling, a single
+# scraper polling the public route could fill a user's timeline in
+# seconds, masking real events (privacy changes, etc.). One log per
+# (viewer, target) pair every 60 s is plenty for analytics and keeps
+# the timeline readable. The cache backend is whatever Django is
+# configured with (LocMem in dev, Redis in prod); the ``cache`` calls
+# are wrapped in try/except so a cache outage never breaks the read.
+PROFILE_VIEW_THROTTLE_SECONDS = 60
+PROFILE_VIEW_THROTTLE_KEY = 'profile_view_logged:{viewer}:{target}'
+
+
+def _log_profile_view(user, viewer, via):
+    """
+    Throttled wrapper around ``record_activity`` for the
+    ``profile_view`` action. One log per ``(viewer, target)`` pair
+    per ``PROFILE_VIEW_THROTTLE_SECONDS`` window.
+    """
+    viewer_key = str(viewer.id) if viewer else 'anon'
+    cache_key = PROFILE_VIEW_THROTTLE_KEY.format(viewer=viewer_key, target=user.id)
+    try:
+        already_logged = cache.get(cache_key)
+    except Exception:
+        # Cache outage — fall back to "log everything" rather than
+        # silently swallowing. The DB is the durability backstop.
+        already_logged = False
+    if already_logged:
+        return
+    try:
+        cache.set(cache_key, timezone.now().isoformat(), PROFILE_VIEW_THROTTLE_SECONDS)
+    except Exception:
+        # Best-effort: if the SET fails we still log this view and
+        # the next call will go through the same code path.
+        pass
+    record_activity(user, 'profile_view', {
+        'viewer_id': viewer.id if viewer else None,
+        'viewer_username': viewer.username if viewer else 'anonymous',
+        'via': via,
+    })
 
 
 def _validate_social_links(value):
@@ -135,6 +202,14 @@ class ProfileViewSet(viewsets.ModelViewSet):
             storage_results = {}
 
             if request.method == 'GET':
+                # Intentionally bypasses the ``retrieve`` email-blanking
+                # redaction. The user must ALWAYS see their own email
+                # on the Kot3 Profile single-page preview regardless of
+                # the ``show_contact_info`` toggle — that toggle only
+                # affects how OTHER users see this user's profile. The
+                # persona emulator (Stranger / Mutual Friend / You) in
+                # ``src/components/kot3/Kot3Profile.jsx`` depends on
+                # this asymmetry to work correctly.
                 user = User.objects.select_related('profile').get(id=request.user.id)
                 return Response(UserSerializer(user).data)
 
@@ -246,7 +321,46 @@ class ProfileViewSet(viewsets.ModelViewSet):
 
             serializer = self.get_serializer(profile, data=clean, partial=True)
             if serializer.is_valid():
+                # Capture the BEFORE values of the 4 privacy knobs so the
+                # activity log can record an ``old -> new`` transition.
+                # We do this only when those keys are present in the
+                # request payload so a normal bio / avatar update does
+                # not generate noise.
+                privacy_keys = (
+                    'profile_visibility', 'last_seen_visibility',
+                    'show_contact_info', 'allow_stranger_dms',
+                )
+                privacy_before = {k: getattr(profile, k) for k in privacy_keys}
                 serializer.save()
+                # Decide which activity entries to write, one per key
+                # that actually flipped. Putting the loop after ``save``
+                # means we use the POST-save state for the new value.
+                for key in privacy_keys:
+                    if key not in clean:
+                        continue
+                    new_val = getattr(profile, key)
+                    old_val = privacy_before[key]
+                    if new_val == old_val:
+                        continue
+                    if key in ('show_contact_info', 'allow_stranger_dms'):
+                        action = 'contact_toggle' if key == 'show_contact_info' else 'dms_toggle'
+                    else:
+                        action = 'visibility_change'
+                    record_activity(request.user, action, {
+                        'field': key,
+                        'old': old_val,
+                        'new': new_val,
+                    })
+                # Catch-all for any non-privacy field the user touched.
+                non_privacy_changes = [
+                    k for k in clean.keys()
+                    if k not in privacy_keys
+                    and k not in ('username',)  # username is a User field, not Profile
+                ]
+                if non_privacy_changes:
+                    record_activity(request.user, 'profile_update', {
+                        'fields': non_privacy_changes,
+                    })
                 resp = Response(serializer.data)
                 # Surface Supabase Storage upload-fallback to operators /
                 # the FE observability layer so a misconfigured deploy
@@ -312,6 +426,72 @@ class ProfileViewSet(viewsets.ModelViewSet):
             ):
                 redacted_profile[hidden_field] = None
             data['profile'] = redacted_profile
+        elif not getattr(instance, 'show_contact_info', False):
+            # Public / friends mode: honor the per-field 0021 toggle
+            # ``show_contact_info``. When the user has opted to hide
+            # their contact details, blank the top-level ``email`` on
+            # the response (the only User-level field we redact here;
+            # ``phone`` is not currently exposed via the serializer).
+            data['email'] = ''
+        # Record the view in the activity log (fire-and-forget,
+        # throttled per (viewer, target) pair — see _log_profile_view).
+        # Skip self-views so the user's own timeline isn't cluttered
+        # with every page-load from the MyProfile / Kot3Profile.
+        viewer = request.user if request.user.is_authenticated else None
+        if viewer is None or viewer.id != user.id:
+            _log_profile_view(user, viewer, via='retrieve')
+        return Response(data)
+
+    @action(detail=False, methods=['get'], url_path=r'u/(?P<username>[\w.@+-]+)')
+    def public_by_username(self, request, username=None):
+        """
+        Public, privacy-redacted profile view keyed by username.
+
+        The FE uses this for the QR-code share flow:
+        - The QR encodes ``<frontend-host>/u/<username>``.
+        - Scanning the QR takes the visitor to the React single-page
+          app which calls THIS endpoint (or the React app's own
+          /u/<username> route once we add a public share-page).
+        - We attach a ``public_url`` field to the response so the
+          React ``ShareModal`` can copy-paste it without rebuilding
+          the path.
+
+        We re-use ``retrieve``'s redaction logic to keep the two
+        endpoints in lockstep — a single source of truth for what
+        a non-friend / non-self can see.
+        """
+        try:
+            user = User.objects.select_related('profile').get(username__iexact=username)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        # Borrow ``retrieve``'s response building so the redaction is
+        # identical. We can't call ``self.retrieve`` directly because
+        # it expects a pk from the URL router; instead we inline the
+        # same logic.
+        instance = user.profile
+        scoping = (instance.profile_visibility or 'public').lower()
+        data = UserSerializer(user).data
+        if scoping == 'private':
+            profile = data.get('profile') or {}
+            redacted_profile = {'avatar': profile.get('avatar')}
+            for hidden_field in (
+                'bio', 'status_text', 'cover_photo', 'interests',
+                'social_links', 'country', 'last_seen',
+            ):
+                redacted_profile[hidden_field] = None
+            data['profile'] = redacted_profile
+        elif not getattr(instance, 'show_contact_info', False):
+            data['email'] = ''
+        # Public, shareable URL pointing at the React share-page.
+        data['public_url'] = request.build_absolute_uri(f'/u/{user.username}')
+        # Record the view in the activity log (throttled — see
+        # ``_log_profile_view``).
+        viewer = request.user if request.user.is_authenticated else None
+        if viewer is None or viewer.id != user.id:
+            _log_profile_view(user, viewer, via='public_by_username')
         return Response(data)
 
 
@@ -349,6 +529,27 @@ class MuteViewSet(viewsets.ModelViewSet):
         if instance.actor_id != self.request.user.id:
             self.permission_denied(self.request)
         instance.delete()
+
+
+# ----------------------------------------------------------------------
+# Activity log viewset (read-only)
+# ----------------------------------------------------------------------
+class ActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ``GET /api/profile/activity/`` — returns the authenticated user's
+    last N profile events, newest first. Capped at 50 entries per
+    request to keep the payload small; pagination can be added later
+    if users with high activity hit the cap.
+    """
+    serializer_class = ProfileActivityLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            ProfileActivityLog.objects
+            .filter(user=self.request.user)
+            .order_by('-created_at')[:50]
+        )
 
 
 def get_block_or_mute_user_ids(user):

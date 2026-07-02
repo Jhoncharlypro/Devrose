@@ -57,6 +57,10 @@
  *   onSend               : () => void              the actual submit
  *   disableSend          : boolean                no text + no image → false
  *
+ *   // disappearing-messages picker
+ *   ephemeralSeconds      : number    0 = off, else seconds-until-expiry
+ *   onPickEphemeral       : (seconds: number) => void   toggles 1h / 24h / 7d / off
+ *
  *   // language + toast
  *   lang                 : 'ht' | 'en' | …
  *   onToast              : (msg, icon) => void     surfaced for UX
@@ -64,7 +68,7 @@
  *   // file-ref for the camera-button "open file picker" gesture
  *   fileInputRef         : React.RefObject<HTMLInputElement>
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
 import './composer.css';
 
 /**
@@ -94,15 +98,23 @@ export function Composer({
   input, onInputChange,
   replyingTo, editingMessage, onCancelContext,
   attachedImage, imagePreviewUrl, attachmentMenuOpen, onToggleAttachmentMenu,
-  onAttachImage, onClearAttachedImage,
+  onAttachImage, onAttachDocument, onAttachLocation, onClearAttachedImage,
+  attachedDocument, attachedLocation,
   isRecording, onStartRecording, onStopRecording, onCancelRecording,
   emojiPickerOpen, onToggleEmoji, onPickEmoji,
   onSend, disableSend,
+  ephemeralSeconds = 0, onPickEphemeral,
   lang, onToast, fileInputRef,
 }) {
   // We only read recent emojis on mount (and re-read on picker open) so the
   // picker doesn't re-read localStorage on every keystroke.
   const recentEmojis = useMemo(() => loadRecentEmojis(), [emojiPickerOpen]);
+
+  // Hidden file-input handle for the "Document" attachment (PDF / DOCX /
+  // TXT / XLSX / PPT / ZIP). The hidden ``<input>`` below consumes this
+  // ref via a callback ref so two sibling inputs don't fight each other
+  // when React re-renders the composer mid-mount.
+  const composerDocInputRef = useRef(null);
 
   const rememberEmoji = (e) => {
     try {
@@ -123,6 +135,39 @@ export function Composer({
     e.target.value = '';
   };
 
+  const handleAttachDocument = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      onToast?.(lang === 'ht' ? 'Dokiman twò gwo. Max 10MB.' : 'Document too large. Max 10MB.', 'exclamation-triangle');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      onAttachDocument?.({ name: file.name, base64: String(reader.result || '') });
+      onToggleAttachmentMenu?.();
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const handleAttachLocation = () => {
+    if (!navigator.geolocation) {
+      onToast?.(lang === 'ht' ? 'Navigatè a pa sipòte lokalizasyon.' : 'Geolocation not supported.', 'exclamation-triangle');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => onAttachLocation?.({
+        lat: pos.coords.latitude, lng: pos.coords.longitude,
+        name: lang === 'ht' ? 'Pozisyon mwen' : 'My location',
+      }),
+      (err) => onToast?.(lang === 'ht' ? 'Pa ka jwenn pozisyon.' : 'Cannot retrieve position.', 'exclamation-triangle'),
+      { enableHighAccuracy: false, timeout: 8000 }
+    );
+    onToggleAttachmentMenu?.();
+  };
+
   return (
     <footer className="kot3-chat-footer" aria-label={lang === 'ht' ? 'Kompozitè mesaj' : 'Message composer'}>
       {/* Hidden file input shared by the attach menu's "Pick a photo" button */}
@@ -132,6 +177,14 @@ export function Composer({
         accept="image/*"
         style={{ display: 'none' }}
         onChange={handleAttachImage}
+      />
+      {/* Hidden file inputs for documents + all-types picker (Phase 9). */}
+      <input
+        ref={(el) => { composerDocInputRef.current = el; }}
+        type="file"
+        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.json,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        style={{ display: 'none' }}
+        onChange={handleAttachDocument}
       />
 
       {/* Context banner: shown for reply OR edit. Click X to dismiss both. */}
@@ -185,6 +238,48 @@ export function Composer({
         </div>
       )}
 
+      {/* Document preview chip — file name + size */}
+      {attachedDocument && (
+        <div className="kot3-doc-preview-chip" style={{ position: 'absolute', bottom: '64px', left: 60 }}>
+          <i className="fas fa-file-alt" aria-hidden="true" />
+          <span>{attachedDocument.name}</span>
+          <button type="button" onClick={() => onClearAttachedImage?.()} aria-label={lang === 'ht' ? 'Retire' : 'Remove'}>
+            <i className="fas fa-times" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      {/* Location preview chip — lat/lng */}
+      {attachedLocation && (
+        <div className="kot3-loc-preview-chip" style={{ position: 'absolute', bottom: '64px', left: 60 }}>
+          <i className="fas fa-map-marker-alt" aria-hidden="true" />
+          <span>{attachedLocation.name || `${attachedLocation.lat.toFixed(4)}, ${attachedLocation.lng.toFixed(4)}`}</span>
+          <button type="button" onClick={() => onClearAttachedImage?.()} aria-label={lang === 'ht' ? 'Retire' : 'Remove'}>
+            <i className="fas fa-times" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      {/* Ephemeral countdown pill — appears beside the composer when active */}
+      {ephemeralSeconds > 0 && (
+        <div className="kot3-ephemeral-pill" style={{
+          position: 'absolute', bottom: '64px', right: 14,
+          fontSize: 11, fontWeight: 700,
+          color: 'var(--primary-color)',
+          background: 'rgba(var(--primary-rgb), 0.10)',
+          padding: '4px 10px', borderRadius: 12,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <i className="fas fa-hourglass-half" aria-hidden="true" />
+          <span>{ephemeralSeconds >= 86400 ? `${ephemeralSeconds / 86400}d` :
+                ephemeralSeconds >= 3600 ? `${ephemeralSeconds / 3600}h` :
+                `${ephemeralSeconds / 60}m`}</span>
+          <button type="button" onClick={() => onPickEphemeral?.(0)} aria-label={lang === 'ht' ? 'Anile' : 'Cancel'}>
+            <i className="fas fa-times" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
       {/* Attachment menu trigger */}
       <div style={{ position: 'relative' }}>
         <button
@@ -213,23 +308,10 @@ export function Composer({
               type="button"
               role="menuitem"
               className="kot3-attach-btn"
-              onClick={() => { fileInputRef?.current?.click(); onToggleAttachmentMenu?.(); }}
-            >
-              <i className="fas fa-video" aria-hidden="true" />
-              <span>{lang === 'ht' ? 'Videyo' : 'Video'}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="kot3-attach-btn"
               onClick={() => {
-                onToast?.(
-                  lang === 'ht' ? 'Dokiman: vèsyon pwochèn' : 'Documents: coming soon',
-                  'info-circle'
-                );
+                composerDocInputRef.current?.click();
                 onToggleAttachmentMenu?.();
               }}
-              disabled
             >
               <i className="fas fa-file-alt" aria-hidden="true" />
               <span>{lang === 'ht' ? 'Dokiman' : 'Document'}</span>
@@ -238,14 +320,7 @@ export function Composer({
               type="button"
               role="menuitem"
               className="kot3-attach-btn"
-              onClick={() => {
-                onToast?.(
-                  lang === 'ht' ? 'Lokalizasyon: vèsyon pwochèn' : 'Location: coming soon',
-                  'info-circle'
-                );
-                onToggleAttachmentMenu?.();
-              }}
-              disabled
+              onClick={handleAttachLocation}
             >
               <i className="fas fa-map-marker-alt" aria-hidden="true" />
               <span>{lang === 'ht' ? 'Lokalizasyon' : 'Location'}</span>
@@ -253,6 +328,25 @@ export function Composer({
           </div>
         )}
       </div>
+
+      {/* Disappearing timer trigger — sits to the left of the recorder */}
+      <button
+        type="button"
+        className={`kot3-attach-trigger ${ephemeralSeconds > 0 ? 'active' : ''}`}
+        disabled={isRecording || disable}
+        onClick={() => {
+          // Cycle: off → 1h → 24h → 7d → off.
+          const order = [0, 3600, 86400, 7 * 86400];
+          const idx = order.indexOf(ephemeralSeconds);
+          const next = order[(idx === -1 ? 0 : (idx + 1) % order.length)];
+          onPickEphemeral?.(next);
+        }}
+        aria-label={lang === 'ht' ? 'Disparèt apre' : 'Disappearing after'}
+        title={lang === 'ht' ? 'Tan pou disparèt' : 'Disappearing timer'}
+        style={{ background: 'transparent' }}
+      >
+        <i className="fas fa-hourglass-half" aria-hidden="true" />
+      </button>
 
       {/* Voice recorder — replaces typing area while recording. */}
       {isRecording ? (

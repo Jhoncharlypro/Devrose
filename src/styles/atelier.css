@@ -1,0 +1,975 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   INVENTOR'S ATELIER — Dark Lab Stylesheet
+   Engineer's workbench feel: monospace, neon pink/cyan, SVG borders,
+   live data readouts. 5 features (Aura, Pulse, Capsule, DNA, Friction).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --atelier-neon: #ff2bd6;          /* hot pink — primary lab accent */
+  --atelier-cyan: #00e7ff;          /* cyan — secondary lab accent */
+  --atelier-amber: #ffb800;         /* amber — warning/transition */
+  --atelier-bg: #08090f;            /* near-black with blue tint */
+  --atelier-bg-2: #0f1117;          /* panel surface */
+  --atelier-border: rgba(255, 43, 214, 0.25);
+  --atelier-text: #e6e6f0;
+  --atelier-text-dim: rgba(230, 230, 240, 0.6);
+  --atelier-mono: 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace;
+  --atelier-friction-speed: 200ms;
+  --atelier-friction-curve: cubic-bezier(0.5, 0, 0.5, 1);
+}
+
+/* ── Lock body scroll while open ─────────────────────────────── */
+body.atelier-open { overflow: hidden; }
+
+/* ── Shell (full-screen modal) ───────────────────────────────── */
+.atelier-shell {
+  position: fixed;
+  inset: 0;
+  /* Twin of `.privacy-shell` fix: ``height: 100dvh`` so the
+     flex-column adapts to the iOS / Android dynamic viewport and
+     the footer stays anchored to the actual visible bottom.
+     ``min-height: 100vh`` is the belt-and-suspenders against
+     browsers that ignore ``dvh`` entirely (Safari < 15.4, FF < 113,
+     Samsung Internet < 22); we use the universal ``vh`` unit so
+     legacy browsers still get a usable floor instead of collapsing
+     below the viewport. */
+  min-height: 100vh;
+  height: 100dvh;
+  z-index: 5000;
+  /* 100% OPAQUE (twin of .privacy-shell fix in
+     kot3-privacy-space.css). Longhand ``background-color``
+     instead of the ``background: var()`` shorthand, with a
+     hex ``#08090f`` fallback so the value is defined even if
+     a legacy mobile browser drops CSS custom-property
+     resolution. Belt-and-suspenders: a redundant opaque
+     ``.atelier-veil`` layer at z-index -1 sits below all
+     other chrome. */
+  background-color: var(--atelier-bg, #08090f);
+  background-image: none;
+  color: var(--atelier-text);
+  font-family: var(--atelier-mono);
+  display: flex;
+  flex-direction: column;
+  animation: atelier-shell-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  overflow: hidden;
+}
+
+@keyframes atelier-shell-in {
+  from { opacity: 0; transform: scale(0.96); filter: blur(6px); }
+  to   { opacity: 1; transform: scale(1);    filter: blur(0); }
+}
+
+/* Subtle film-grain noise overlay so the dark panels don't feel flat. */
+.atelier-noise {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' /></filter><rect width='200' height='200' filter='url(%23n)' /></svg>");
+  /* ``mix-blend-mode: overlay`` removed (twin of privacy
+     fix) — iOS Safari stacking-context punch-through source.
+     Pure 0.04 opacity renders the same grain safely. */
+}
+
+/* ── VEIL (safety belt twin of .privacy-veil) ──────────────── */
+.atelier-veil {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  /* ⚠️ LOAD-BEARING — DO NOT drop this opaque bg.
+     The corner-glow below is decorative translucent alpha
+     painted ON TOP of THIS solid base. If a future edit
+     removes this line thinking "the shadow does the work"
+     the bleed-through bug returns. The JSON-level safety
+     belt is the corresponding <div className="atelier-veil">
+     element in Atelier.jsx AS WELL — both layers are
+     required. Twin of .privacy-veil in kot3-privacy-space.css. */
+  background-color: var(--atelier-bg, #08090f);
+  /* Inset box-shadow corner glow — twin of .privacy-veil.
+     Recreates the pink-to-cyan cross-diagonal flavour
+     of the original radial-gradient backdrop WITHOUT
+     any transparent gradient stops. Atelier-pink in
+     the top-left, atelier-cyan in the bottom-right,
+     summed in a single shadow stack. The veil's own
+     bg stays 100% opaque so this is safe. */
+  box-shadow:
+    inset 220px 220px 220px -130px rgba(255, 43, 214, 0.50),
+    inset -220px -220px 220px -130px rgba(0, 231, 255, 0.40);
+  pointer-events: none;
+}
+
+/* ── Top bar ──────────────────────────────────────────────────── */
+.atelier-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--atelier-border);
+  /* OPAQUE solid topbar (twin of privacy fix). The
+     ``background: linear-gradient()`` shorthand defaults
+     ``background-color`` to ``transparent``, exposing the
+     body beneath the trailing-transparent gradient stop
+     in some Safari versions. */
+  background-color: var(--atelier-bg-2, #0f1117);
+  position: relative; z-index: 1;
+  flex-shrink: 0;
+}
+.atelier-topbar-title {
+  display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0;
+}
+.atelier-pulse-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--atelier-neon);
+  box-shadow: 0 0 12px var(--atelier-neon);
+  animation: atelier-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes atelier-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.15); }
+}
+.atelier-topbar h2 {
+  margin: 0; font-size: 1.15rem; font-weight: 800; letter-spacing: 0.02em;
+  color: var(--atelier-text);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.atelier-subtitle {
+  font-size: 0.78rem; color: var(--atelier-text-dim);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.atelier-close {
+  width: 38px; height: 38px;
+  border: 1px solid var(--atelier-border);
+  background: transparent;
+  color: var(--atelier-text);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.atelier-close:hover {
+  background: rgba(255, 43, 214, 0.12);
+  border-color: var(--atelier-neon);
+  color: var(--atelier-neon);
+  transform: rotate(90deg);
+}
+
+/* ── Tabs (the 5 inventions) ─────────────────────────────────── */
+.atelier-tabs {
+  display: flex; gap: 4px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--atelier-border);
+  overflow-x: auto;
+  position: relative; z-index: 1;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.atelier-tabs::-webkit-scrollbar { display: none; }
+.atelier-tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 18px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--atelier-text-dim);
+  font-family: var(--atelier-mono);
+  font-size: 0.82rem; font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  position: relative;
+}
+.atelier-tab i { font-size: 0.85rem; }
+.atelier-tab:hover { color: var(--atelier-text); }
+.atelier-tab.is-active {
+  color: var(--atelier-neon);
+  border-bottom-color: var(--atelier-neon);
+  text-shadow: 0 0 8px rgba(255, 43, 214, 0.4);
+}
+
+/* ── Main scroll area ────────────────────────────────────────── */
+.atelier-main {
+  flex: 1;
+  overflow-y: auto;
+  /* Padding-bottom bumped 80→120px (twin of .privacy-main)
+     because the footer is now position:fixed (out of flex
+     flow). Without this bump, main extends to the viewport
+     bottom and the last pane card would scroll BEHIND the
+     fixed footer. 120px = footer (~50px) + safe-area-inset-
+     bottom (~34px max on iPhone X-class) + ~36px breathing
+     room so the last card sits comfortably above the footer. */
+  padding: 24px 24px 160px 24px;
+  /* Twin of Privacy Space: stable scrollbar gutter prevents the
+     footer-area hop that reads as "the page is wobbling". */
+  scrollbar-gutter: stable;
+  position: relative; z-index: 1;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 43, 214, 0.4) transparent;
+}
+.atelier-main::-webkit-scrollbar { width: 8px; }
+.atelier-main::-webkit-scrollbar-thumb {
+  background: rgba(255, 43, 214, 0.4); border-radius: 4px;
+}
+
+/* ── Pane (each feature container) ───────────────────────────── */
+.atelier-pane {
+  max-width: 880px; margin: 0 auto;
+  animation: atelier-pane-in 0.4s ease both;
+}
+@keyframes atelier-pane-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.atelier-pane-head {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px dashed var(--atelier-border);
+}
+.atelier-pane-head h3 {
+  margin: 0 0 6px; font-size: 1.05rem; font-weight: 800;
+  color: var(--atelier-text);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.atelier-pane-head p {
+  margin: 0; font-size: 0.82rem; color: var(--atelier-text-dim);
+  line-height: 1.5;
+}
+
+/* ── Buttons (shared) ─────────────────────────────────────────── */
+.atelier-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-family: var(--atelier-mono);
+  font-size: 0.78rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  border: 1px solid var(--atelier-border);
+  background: transparent;
+  color: var(--atelier-text);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.atelier-btn i { font-size: 0.78rem; }
+.atelier-btn:hover { transform: translateY(-1px); }
+.atelier-btn:active { transform: scale(0.97); }
+.atelier-btn-primary {
+  background: linear-gradient(135deg, rgba(255, 43, 214, 0.2), rgba(0, 231, 255, 0.15));
+  border-color: var(--atelier-neon);
+  color: var(--atelier-neon);
+  box-shadow: 0 0 0 1px rgba(255, 43, 214, 0.3), 0 4px 14px rgba(255, 43, 214, 0.15);
+}
+.atelier-btn-primary:hover {
+  background: linear-gradient(135deg, rgba(255, 43, 214, 0.3), rgba(0, 231, 255, 0.22));
+  box-shadow: 0 0 0 1px var(--atelier-neon), 0 6px 20px rgba(255, 43, 214, 0.3);
+}
+.atelier-btn-ghost {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--atelier-text-dim);
+}
+.atelier-btn-ghost:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--atelier-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.atelier-btn-danger {
+  background: rgba(255, 60, 80, 0.08);
+  border-color: rgba(255, 60, 80, 0.4);
+  color: #ff5c70;
+}
+.atelier-btn-danger:hover {
+  background: rgba(255, 60, 80, 0.15);
+  border-color: #ff5c70;
+}
+
+/* ── AURA SYNTHESIZER ────────────────────────────────────────── */
+.atelier-aura-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 24px;
+  align-items: stretch;
+}
+.atelier-aura-dials {
+  display: flex; flex-direction: column; gap: 20px;
+  padding: 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.atelier-aura-preview {
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  align-items: center; justify-content: center;
+}
+.atelier-aura-sphere {
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  position: relative;
+  transition: all 0.3s ease;
+  animation: atelier-sphere-float 5s ease-in-out infinite;
+}
+@keyframes atelier-sphere-float {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50%      { transform: translateY(-8px) scale(1.02); }
+}
+.atelier-aura-palette {
+  width: 100%;
+  text-align: center;
+}
+.atelier-aura-palette-label {
+  font-size: 0.7rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  display: block; margin-bottom: 8px;
+}
+.atelier-aura-palette-row {
+  display: flex; gap: 6px; justify-content: center;
+  margin-bottom: 12px;
+}
+.atelier-aura-swatch {
+  width: 44px; height: 44px;
+  border-radius: 8px;
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+.atelier-aura-swatch:hover { transform: scale(1.1) translateY(-2px); z-index: 2; }
+.atelier-aura-swatch-hex {
+  position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
+  font-size: 0.6rem; color: var(--atelier-text-dim);
+  font-family: var(--atelier-mono);
+  white-space: nowrap;
+  opacity: 0; transition: opacity 0.2s;
+}
+.atelier-aura-swatch:hover .atelier-aura-swatch-hex { opacity: 1; }
+.atelier-aura-readout {
+  display: flex; justify-content: center; gap: 12px;
+  font-family: var(--atelier-mono);
+  padding: 6px 0;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  margin-top: 4px;
+}
+.atelier-readout-label { color: var(--atelier-text-dim); font-size: 0.78rem; }
+.atelier-readout-val   { color: var(--atelier-neon); font-size: 0.85rem; font-weight: 700; }
+.atelier-aura-actions {
+  display: flex; gap: 10px; justify-content: center;
+  margin-top: 18px;
+}
+
+/* Dial */
+.atelier-dial {
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+}
+.atelier-dial-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.72rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  align-self: flex-start;
+}
+.atelier-dial-label i { color: var(--atelier-cyan); }
+.atelier-dial-knob {
+  width: 100px; height: 100px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  position: relative;
+  transition: background 0.15s ease;
+}
+.atelier-dial-knob-inner {
+  width: 78px; height: 78px;
+  border-radius: 50%;
+  background: var(--atelier-bg-2);
+  border: 1px solid var(--atelier-border);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.atelier-dial-value {
+  font-family: var(--atelier-mono);
+  font-size: 0.95rem; font-weight: 700;
+  color: var(--atelier-neon);
+  text-shadow: 0 0 8px rgba(255, 43, 214, 0.4);
+}
+.atelier-dial-slider {
+  width: 100%;
+  -webkit-appearance: none; appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.atelier-dial-slider::-webkit-slider-runnable-track {
+  height: 2px; background: rgba(255, 255, 255, 0.1); border-radius: 1px;
+}
+.atelier-dial-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--atelier-neon);
+  box-shadow: 0 0 8px var(--atelier-neon);
+  margin-top: -5px;
+}
+.atelier-dial-slider::-moz-range-track {
+  height: 2px; background: rgba(255, 255, 255, 0.1); border-radius: 1px;
+}
+.atelier-dial-slider::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--atelier-neon);
+  box-shadow: 0 0 8px var(--atelier-neon);
+  border: 0;
+}
+
+/* ── COGNITIVE PULSE ─────────────────────────────────────────── */
+.atelier-pulse-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 24px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+.atelier-pulse-controls {
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.atelier-pulse-readout {
+  padding: 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex; flex-direction: column; align-items: center;
+  gap: 14px;
+}
+.atelier-pulse-score {
+  font-family: var(--atelier-mono);
+  display: flex; align-items: baseline; gap: 4px;
+  text-shadow: 0 0 16px currentColor;
+  transition: color 0.3s ease;
+}
+.atelier-pulse-score-num { font-size: 4rem; font-weight: 800; line-height: 1; }
+.atelier-pulse-score-unit { font-size: 1.1rem; opacity: 0.5; }
+.atelier-pulse-score-label {
+  font-size: 0.72rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.atelier-pulse-wave {
+  width: 100%; height: 80px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.atelier-pulse-formula {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  font-family: var(--atelier-mono);
+  font-size: 0.78rem; color: var(--atelier-text-dim);
+  text-align: center;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+.atelier-pulse-formula-vals { color: var(--atelier-cyan); font-size: 0.72rem; }
+.atelier-pulse-recommend {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 3px solid var(--atelier-amber);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--atelier-text);
+}
+.atelier-pulse-recommend i { font-size: 1.1rem; }
+.atelier-pulse-recommend strong {
+  display: block; font-size: 0.7rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+/* Slider row */
+.atelier-slider-row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 0.8rem;
+}
+.atelier-slider-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.72rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  width: 130px; flex-shrink: 0;
+}
+.atelier-slider-label i { color: var(--atelier-cyan); width: 12px; }
+.atelier-slider {
+  flex: 1;
+  -webkit-appearance: none; appearance: none;
+  background: transparent;
+  cursor: pointer;
+  height: 24px;
+}
+.atelier-slider::-webkit-slider-runnable-track {
+  height: 4px; background: rgba(255, 255, 255, 0.08); border-radius: 2px;
+}
+.atelier-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--atelier-cyan);
+  box-shadow: 0 0 8px var(--atelier-cyan);
+  margin-top: -6px;
+  border: 2px solid var(--atelier-bg-2);
+}
+.atelier-slider::-moz-range-track {
+  height: 4px; background: rgba(255, 255, 255, 0.08); border-radius: 2px;
+}
+.atelier-slider::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--atelier-cyan);
+  box-shadow: 0 0 8px var(--atelier-cyan);
+  border: 2px solid var(--atelier-bg-2);
+}
+.atelier-slider-value {
+  width: 70px; flex-shrink: 0;
+  font-family: var(--atelier-mono);
+  font-size: 0.8rem; font-weight: 700;
+  color: var(--atelier-cyan);
+  text-align: right;
+  text-shadow: 0 0 6px rgba(0, 231, 255, 0.4);
+}
+
+/* ── CHRONO-CAPSULE ──────────────────────────────────────────── */
+.atelier-capsule-composer {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 18px;
+}
+.atelier-capsule-label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 0.72rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.atelier-capsule-textarea,
+.atelier-capsule-date {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--atelier-bg-2);
+  border: 1px solid var(--atelier-border);
+  color: var(--atelier-text);
+  font-family: var(--atelier-mono);
+  font-size: 0.9rem;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  text-transform: none;
+}
+.atelier-capsule-textarea:focus,
+.atelier-capsule-date:focus {
+  border-color: var(--atelier-neon);
+  box-shadow: 0 0 0 3px rgba(255, 43, 214, 0.15);
+}
+.atelier-capsule-list {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.atelier-capsule-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 36px 20px;
+  border: 1px dashed var(--atelier-border);
+  border-radius: 10px;
+  color: var(--atelier-text-dim);
+  font-size: 0.85rem;
+  text-align: center;
+}
+.atelier-capsule-empty i { font-size: 1.8rem; opacity: 0.5; }
+.atelier-capsule-card {
+  display: flex; gap: 16px; align-items: flex-start;
+  padding: 16px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: all 0.3s ease;
+}
+.atelier-capsule-card.is-revealed {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.04);
+}
+.atelier-capsule-card.is-sealed:hover {
+  border-color: var(--atelier-neon);
+  background: rgba(255, 43, 214, 0.04);
+}
+.atelier-capsule-rings {
+  width: 110px; height: 110px; flex-shrink: 0;
+}
+.atelier-capsule-content {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.atelier-capsule-text {
+  font-family: var(--atelier-mono);
+  font-size: 0.85rem; line-height: 1.5;
+  color: var(--atelier-text);
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  border-left: 2px solid var(--atelier-cyan);
+  word-break: break-word;
+  max-height: 100px;
+  overflow-y: auto;
+}
+.atelier-capsule-card.is-revealed .atelier-capsule-text {
+  border-left-color: #22c55e;
+}
+.atelier-capsule-meta {
+  display: flex; gap: 14px;
+  font-size: 0.7rem; color: var(--atelier-text-dim);
+}
+.atelier-capsule-meta i { color: var(--atelier-neon); margin-right: 4px; }
+.atelier-capsule-actions {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+
+/* ── TYPOGRAPHIC DNA ─────────────────────────────────────────── */
+.atelier-dna-stage {
+  margin-bottom: 18px;
+}
+.atelier-dna-textarea {
+  width: 100%;
+  padding: 18px 20px;
+  background: var(--atelier-bg-2);
+  border: 1px solid var(--atelier-border);
+  color: var(--atelier-text);
+  font-family: var(--atelier-mono);
+  font-size: 1.3rem;
+  resize: vertical;
+  outline: none;
+  transition: all 0.3s var(--atelier-friction-curve);
+  text-transform: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 43, 214, 0.05);
+}
+.atelier-dna-textarea:focus {
+  border-color: var(--atelier-neon);
+  box-shadow: 0 0 0 3px rgba(255, 43, 214, 0.15), inset 0 0 0 1px rgba(255, 43, 214, 0.3);
+}
+.atelier-dna-textarea::placeholder { color: var(--atelier-text-dim); }
+.atelier-dna-hint {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--atelier-text-dim);
+  display: flex; align-items: center; gap: 6px;
+}
+.atelier-dna-hint strong {
+  color: var(--atelier-neon);
+  text-shadow: 0 0 6px rgba(255, 43, 214, 0.4);
+  margin-left: 4px;
+}
+.atelier-dna-readout {
+  padding: 16px 18px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.atelier-dna-meter-svg {
+  width: 100%; height: 60px;
+  display: block;
+}
+.atelier-dna-meter-labels {
+  display: flex; justify-content: space-between;
+  font-size: 0.65rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+.atelier-dna-formula {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--atelier-mono);
+  font-size: 0.78rem;
+  color: var(--atelier-text-dim);
+  flex-wrap: wrap; gap: 6px;
+}
+.atelier-dna-formula strong { color: var(--atelier-neon); }
+.atelier-dna-samples { font-size: 0.7rem; opacity: 0.7; }
+
+/* ── DIGITAL FRICTION ─────────────────────────────────────────── */
+.atelier-friction-stage {
+  display: flex; flex-direction: column; gap: 14px;
+  align-items: center;
+  padding: 30px 20px;
+  border: 1px solid var(--atelier-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 18px;
+}
+.atelier-friction-ball {
+  width: 80px; height: 80px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, var(--atelier-neon), var(--atelier-cyan));
+  box-shadow: 0 0 calc(20px + var(--friction) * 60px) rgba(255, 43, 214, 0.6);
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  transition: box-shadow var(--atelier-friction-speed) var(--atelier-friction-curve);
+}
+.atelier-friction-ball-inner {
+  width: 50%; height: 50%; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  filter: blur(4px);
+  animation: atelier-friction-wobble calc(0.6s + var(--friction) * 1.4s) var(--atelier-friction-curve) infinite alternate;
+}
+@keyframes atelier-friction-wobble {
+  from { transform: translateX(-4px) scale(0.95); }
+  to   { transform: translateX(4px) scale(1.05); }
+}
+.atelier-friction-track {
+  width: 100%; max-width: 400px; height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  position: relative;
+}
+.atelier-friction-marker {
+  position: absolute; top: 50%;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--atelier-neon);
+  box-shadow: 0 0 10px var(--atelier-neon);
+  transform: translate(-50%, -50%);
+  transition: left var(--atelier-friction-speed) var(--atelier-friction-curve);
+}
+.atelier-friction-labels {
+  display: flex; justify-content: space-between;
+  width: 100%; max-width: 400px;
+  font-size: 0.72rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.atelier-friction-slider { width: 100%; max-width: 400px; }
+.atelier-friction-readout {
+  display: flex; flex-direction: column; gap: 4px;
+  font-family: var(--atelier-mono);
+  font-size: 0.78rem; color: var(--atelier-text-dim);
+  text-align: center;
+}
+.atelier-friction-readout strong { color: var(--atelier-neon); }
+.atelier-friction-readout code {
+  font-size: 0.7rem;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--atelier-cyan);
+}
+
+/* ── Footer ──────────────────────────────────────────────────── */
+.atelier-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  /* ``padding-bottom`` = base + iOS safe-area inset so the footer
+     tag sits above the home indicator on iPhone-X-class devices.
+     ``align-self: flex-end`` is the twin of Privacy Space's
+     hardening — guarantees the footer sticks to the bottom of the
+     shell even on browsers whose flex math drifts. */
+  padding: 20px 24px calc(16px + env(safe-area-inset-bottom, 0px)) 24px;
+  border-top: 1px solid var(--atelier-border);
+  /* Frosted-glass twin of `.privacy-footer`: solid translucent
+     black + backdrop-filter blur so the scrolling main panel is
+     cleanly clipped at the footer boundary. */
+  /* OPAQUE SOLID (twin of privacy footer fix). The Atelier
+     footer sat at the same "absolute bottom" position the
+     user complained about. ``backdrop-filter`` literally
+     REQUIRES see-through to do its job. The 2px upward
+     ``box-shadow`` is the same hard-barrier visual feel
+     without any transparency. */
+  background-color: var(--atelier-bg, #08090f);
+  /* Reduced shadow blur for the same GPU-compositor reason as in
+     Privacy Space — the previous 24px blur caused perceptible
+     jitter on slower mobile GPUs. */
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.5);
+  /* Twin of Privacy Space: sticky + bottom:0 + flex-end together
+     guarantee the footer is glued to the shell's bottom edge even
+     when flex math drifts on Chromium / Samsung Internet. We
+     deliberately AVOID ``will-change: transform`` (the React/Vue
+     "permanent GPU memory leak" footgun) — the 12px shadow blur
+     reduction already mitigates the rendering wobble so layer
+     promotion is no longer needed. */
+  /* position: fixed; + bottom/left/right: 0 (twin of .privacy-footer
+     fix in kot3-privacy-space.css) — VIEWPORT-anchored
+     unconditional anchoring so the Atelier's footer never
+     drifts regardless of dvh fallback or flex math. The
+     footer is now OUT OF FLEX FLOW (align-self is irrelevant
+     when fixed; we drop it), so .atelier-main’s padding-bottom
+     is bumped 80→120px below to clear it. */
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  flex-shrink: 0;
+}
+.atelier-footer-tag {
+  font-family: var(--atelier-mono);
+  font-size: 0.78rem; color: var(--atelier-text-dim);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .atelier-topbar { padding: 12px 16px; }
+  .atelier-topbar h2 { font-size: 0.95rem; }
+  .atelier-subtitle { display: none; }
+  .atelier-main { padding: 16px; }
+  .atelier-tabs { padding: 0 12px; }
+  .atelier-tab { padding: 12px 12px; font-size: 0.72rem; }
+  .atelier-tab span { display: none; }
+  .atelier-aura-grid,
+  .atelier-pulse-grid { grid-template-columns: 1fr; }
+  .atelier-capsule-card { flex-direction: column; align-items: center; text-align: center; }
+  .atelier-pulse-score-num { font-size: 3rem; }
+}
+
+/* ── Reduced motion ──────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .atelier-shell,
+  .atelier-pane,
+  .atelier-pulse-dot,
+  .atelier-aura-sphere,
+  .atelier-friction-ball-inner {
+    animation: none !important;
+  }
+  .atelier-friction-ball-inner { transform: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ATELIER LAUNCHER BUTTON (sits inside Settings, opens the overlay)
+   Glassmorphic card with neon-pink border, pulsing dot, hover lift.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.atelier-launcher {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 16px 18px;
+  margin: 0 0 24px;
+  background: linear-gradient(135deg,
+    rgba(255, 43, 214, 0.10) 0%,
+    rgba(0, 231, 255, 0.08) 100%);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1.5px solid rgba(255, 43, 214, 0.35);
+  border-radius: 14px;
+  color: var(--text-main, #222);
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(255, 43, 214, 0.12),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transition: transform 0.25s ease,
+              box-shadow 0.25s ease,
+              border-color 0.25s ease;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.atelier-launcher::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 70%);
+  background-size: 200% 100%;
+  transform: translateX(-100%);
+  transition: transform 0.6s ease;
+  pointer-events: none;
+}
+
+.atelier-launcher:hover {
+  transform: translateY(-2px);
+  border-color: var(--atelier-neon, #ff2bd6);
+  box-shadow: 0 8px 28px rgba(255, 43, 214, 0.25),
+              inset 0 1px 0 rgba(255, 255, 255, 0.4),
+              0 0 0 1px rgba(255, 43, 214, 0.4);
+}
+
+.atelier-launcher:hover::before { transform: translateX(100%); }
+.atelier-launcher:active { transform: translateY(0) scale(0.99); }
+.atelier-launcher:focus-visible {
+  outline: 2px solid var(--atelier-neon, #ff2bd6);
+  outline-offset: 2px;
+}
+
+.atelier-launcher-icon {
+  position: relative;
+  flex: 0 0 44px;
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #ff2bd6, #00e7ff);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-size: 1.15rem;
+  box-shadow: 0 4px 14px rgba(255, 43, 214, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+.atelier-launcher-dot {
+  position: absolute;
+  top: -2px; right: -2px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #00e7ff;
+  box-shadow: 0 0 8px #00e7ff, 0 0 0 2px #fff;
+  animation: atelier-launcher-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes atelier-launcher-dot-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.2); }
+}
+
+.atelier-launcher-text {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+
+.atelier-launcher-text strong {
+  font-size: 0.95rem; font-weight: 800;
+  color: var(--text-main, #222);
+  letter-spacing: 0.01em;
+}
+
+.atelier-launcher-text span {
+  font-size: 0.75rem; font-weight: 500;
+  color: var(--text-secondary, #666);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.atelier-launcher-arrow {
+  flex: 0 0 auto;
+  color: var(--atelier-neon, #ff2bd6);
+  font-size: 1rem;
+  transition: transform 0.25s ease;
+  flex-shrink: 0;
+}
+
+.atelier-launcher:hover .atelier-launcher-arrow { transform: translateX(4px); }
+
+body.dark-mode .atelier-launcher {
+  background: linear-gradient(135deg,
+    rgba(255, 43, 214, 0.18) 0%,
+    rgba(0, 231, 255, 0.12) 100%);
+  border-color: rgba(255, 43, 214, 0.45);
+  box-shadow: 0 4px 20px rgba(255, 43, 214, 0.2),
+              inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+body.dark-mode .atelier-launcher-text strong { color: #fff; }
+body.dark-mode .atelier-launcher-text span { color: rgba(255, 255, 255, 0.6); }
+body.dark-mode .atelier-launcher-dot { box-shadow: 0 0 8px #00e7ff, 0 0 0 2px #0f1117; }

@@ -49,7 +49,7 @@ import {
   THEME_BY_ID,
   hexToRgb,
   readCustomAccent,
-} from '../components/kot3chat/constants';
+} from '../components/kot3chat/params';
 
 // Resolve "is the OS currently in dark mode?" without React subscription —
 // pure synchronous read. Result is a stable boolean per OS eval.

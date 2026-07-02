@@ -152,3 +152,213 @@
   flex-shrink: 0;
   align-self: flex-start;
 }
+
+/* ─── KOT3CHAT appearance sections (walls / density / send-tone) ──
+   Reuse the existing chip rhythm of kot3-theme-grid but with
+   shorter rows (single-line labels) so the wallpaper row doesn't
+   push the picker taller than the surrounding topbar.            */
+.kot3-params-section {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 2px 4px 8px;
+}
+
+.kot3-params-density {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.kot3-params-sendtones {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.kot3-params-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.18s;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kot3-params-chip:hover {
+  border-color: var(--primary-color);
+  background: rgba(var(--primary-rgb), 0.08);
+  transform: translateY(-1px);
+}
+
+.kot3-params-chip.active {
+  border-color: var(--primary-color);
+  background: rgba(var(--primary-rgb), 0.18);
+  box-shadow: 0 0 0 1px var(--primary-color) inset;
+}
+
+.kot3-params-chip:disabled,
+.kot3-params-chip--locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: saturate(0.65);
+}
+
+.kot3-params-chip-preview {
+  width: 100%;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+.kot3-params-chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kot3-params-chip-lockicon {
+  font-size: 8.5px;
+  opacity: 0.65;
+}
+
+/* Density preview tile — 4 horizontal bars stacked at variable gap */
+.kot3-params-chip-densitypreview {
+  --kot3-density-mock-gap: 2px;
+  --kot3-density-mock-pad: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kot3-density-mock-gap, 2px);
+  padding: var(--kot3-density-mock-pad, 4px) 4px;
+  width: 24px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.10), rgba(var(--primary-rgb), 0.02));
+}
+.kot3-params-chip-densitypreview i {
+  display: block;
+  height: 2px;
+  flex: 1;
+  background: rgba(var(--primary-rgb), 0.55);
+  border-radius: 1px;
+}
+
+/* Send-tone preview tile — shape preview row, mirrors the chip's
+   border-radius + a tinted core */
+.kot3-params-chip-sendwatch {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  margin: 0 auto;
+}
+.kot3-params-chip-sendwatch--square { border-radius: 6px; }
+.kot3-params-chip-sendwatch--pill {
+  border-radius: 12px;
+  width: 28px;
+  height: 18px;
+}
+.kot3-params-chip-sendwatch--glass {
+  border-radius: 50%;
+  background: rgba(var(--primary-rgb), 0.30);
+  border: 1px solid rgba(var(--primary-rgb), 0.55);
+}
+
+/* ─── CustomThemeEditor tier-preview row ─────────────────────── */
+.kot3-custom-theme-tier-preview {
+  padding: 4px 0 6px;
+}
+
+.kot3-custom-theme-tier-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  padding: 4px 6px 8px;
+}
+
+.kot3-custom-theme-tier-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px 6px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  /* Default halo: muted (free tier). Non-free tiers override these
+     via the inline ``--tier-accent`` + ``--halo`` custom properties
+     injected by CustomThemeEditor.jsx.                              */
+  --tier-accent: var(--text-secondary);
+  --halo: var(--text-secondary);
+  transition: transform 0.15s, border-color 0.18s, background 0.18s;
+}
+.kot3-custom-theme-tier-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--primary-color) !important;
+  background: rgba(var(--primary-rgb), 0.08);
+}
+.kot3-custom-theme-tier-chip.is-default {
+  /* Free tier: subtle muted default so the user can tell it's
+     already selected by default.                          */
+  background: rgba(var(--primary-rgb), 0.04);
+}
+
+.kot3-custom-theme-tier-crown {
+  display: block;
+  line-height: 1;
+  font-size: 16px;
+  color: var(--tier-accent);
+  text-shadow: 0 1px 4px color-mix(in srgb, var(--halo) 67%, transparent);
+}
+.kot3-custom-theme-tier-chip--free .kot3-custom-theme-tier-crown {
+  color: var(--text-secondary);
+  text-shadow: none;
+}
+
+.kot3-custom-theme-tier-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.kot3-custom-theme-tier-chip--free .kot3-custom-theme-tier-label {
+  color: var(--text-secondary);
+}
+
+/* Per-tier colour composition — consumes the inline custom props
+   injected by CustomThemeEditor.jsx so the visual halo + accent
+   tint lives in the cascade rather than ad-hoc inline styles.   */
+.kot3-custom-theme-tier-chip--plus,
+.kot3-custom-theme-tier-chip--pro,
+.kot3-custom-theme-tier-chip--studio,
+.kot3-custom-theme-tier-chip--verified {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--halo) 24%, transparent),
+    0 0 12px color-mix(in srgb, var(--halo) 14%, transparent);
+  background: color-mix(in srgb, var(--tier-accent) 6%, transparent);
+}

@@ -18,6 +18,19 @@ import MessengerHome from './MessengerHome';
 import Kot3Chat from '../Kot3Chat';
 import { chatService } from '../../services/api';
 
+// Phase 9 — wire the 4 thread-flag actions to the real backend endpoints.
+const threadActions = {
+  pin:        (id) => chatService.client?.post(`chat/threads/${id}/pin/`),
+  unpin:      (id) => chatService.client?.post(`chat/threads/${id}/unpin/`),
+  archive:    (id) => chatService.client?.post(`chat/threads/${id}/archive/`),
+  unarchive:  (id) => chatService.client?.post(`chat/threads/${id}/unarchive/`),
+  mute:       (id) => chatService.client?.post(`chat/threads/${id}/mute/`),
+  unmute:     (id) => chatService.client?.post(`chat/threads/${id}/unmute/`),
+  accept:     (id) => chatService.client?.post(`chat/threads/${id}/accept_request/`),
+  ignore:     (id) => chatService.client?.post(`chat/threads/${id}/ignore_request/`),
+};
+
+
 /**
  * Coarse heuristic for "incoming chat from someone I haven't messaged
  * yet" — concat username of the other side into a stable request id.
@@ -147,13 +160,39 @@ export function Kot3ChatDesktop({
           onlineUsersMap={onlineUsersMap}
           typingMap={typingMap}
           onOpenThread={handleOpenThread}
-          onAcceptRequest={(th) => showToast?.(lang === 'ht' ? 'Aksepte demann nan' : 'Accept request', 'check-circle')}
-          onIgnoreRequest={(th) => showToast?.(lang === 'ht' ? 'Inyore demann nan' : 'Ignore request', 'eye-slash')}
-          onBlockRequest={(th) => showToast?.(lang === 'ht' ? 'Bloke' : 'Block', 'ban')}
-          onDeleteRequest={(th) => showToast?.(lang === 'ht' ? 'Efase' : 'Delete', 'trash')}
-          onPinThread={(th) => showToast?.(lang === 'ht' ? 'Epingle' : 'Pin', 'thumbtack')}
-          onArchiveThread={(th) => showToast?.(lang === 'ht' ? 'Achiv' : 'Archive', 'box-archive')}
-          onMuteThread={(th) => showToast?.(lang === 'ht' ? 'Mòd silans' : 'Mute', 'bell-slash')}
+          onAcceptRequest={async (th) => {
+            try {
+              await threadActions.accept(th.id);
+              showToast?.(lang === 'ht' ? 'Demann aksepte' : 'Request accepted', 'check-circle');
+            } catch (e) { showToast?.(lang === 'ht' ? 'Ere aksepte demann' : 'Failed to accept', 'exclamation-triangle'); }
+          }}
+          onIgnoreRequest={async (th) => {
+            try {
+              await threadActions.ignore(th.id);
+              showToast?.(lang === 'ht' ? 'Demann inyore' : 'Request ignored', 'eye-slash');
+            } catch (e) { showToast?.(lang === 'ht' ? 'Ere inyore demann' : 'Failed to ignore', 'exclamation-triangle'); }
+          }}
+          onBlockRequest={(th) => showToast?.(lang === 'ht' ? 'Bloke (vèsyon pwochèn)' : 'Block (coming soon)', 'ban')}
+          onDeleteRequest={(th) => showToast?.(lang === 'ht' ? 'Efase (vèsyon pwochèn)' : 'Delete (coming soon)', 'trash')}
+          onPinThread={async (th) => {
+            try {
+              const wasPinned = threads?.find(t => t.id === th.id)?.is_pinned;
+              if (wasPinned) { await threadActions.unpin(th.id); showToast?.(lang === 'ht' ? 'Depine' : 'Unpinned', 'thumbtack'); }
+              else { await threadActions.pin(th.id); showToast?.(lang === 'ht' ? 'Epingle' : 'Pinned', 'thumbtack'); }
+            } catch (e) { showToast?.(lang === 'ht' ? 'Ere nan epingle' : 'Failed to pin', 'exclamation-triangle'); }
+          }}
+          onArchiveThread={async (th) => {
+            try {
+              await threadActions.archive(th.id);
+              showToast?.(lang === 'ht' ? 'Achiv' : 'Archived', 'box-archive');
+            } catch (e) { showToast?.(lang === 'ht' ? 'Ere nan achiv' : 'Failed to archive', 'exclamation-triangle'); }
+          }}
+          onMuteThread={async (th) => {
+            try {
+              await threadActions.mute(th.id);
+              showToast?.(lang === 'ht' ? 'Mòd silans' : 'Muted', 'bell-slash');
+            } catch (e) { showToast?.(lang === 'ht' ? 'Ere nan mode silans' : 'Failed to mute', 'exclamation-triangle'); }
+          }}
           onProfileItem={handleProfileItem}
         />
       )}

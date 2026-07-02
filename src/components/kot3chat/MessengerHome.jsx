@@ -52,6 +52,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSwipeAction } from '../../hooks/useSwipeAction';
+import { chatService } from '../../services/api';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -248,6 +249,88 @@ function ProfileDrawer({ user, t, onClose, items, onItemClick }) {
   );
 }
 
+// ─── New chat drawer ────────────────────────────────────────────────────────
+function NewChatDrawer({ isOpen, onClose, onPickUser, t, lang = 'ht' }) {
+  const ref = useRef(null);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [pickedId, setPickedId] = useState(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('pointerdown', onDoc);
+    document.addEventListener('keydown', onKey);
+
+    setLoading(true);
+    chatService.getUsers()
+      .then((res) => setUsers(res?.data || []))
+      .catch(() => setUsers([]))
+      .finally(() => setLoading(false));
+
+    return () => {
+      document.removeEventListener('pointerdown', onDoc);
+      document.removeEventListener('keydown', onKey);
+      setPickedId(null);
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  const avatarOf = (u) =>
+    u?.avatar || u?.profile?.avatar
+    || `https://ui-avatars.com/api/?name=${encodeURIComponent(u?.username || '?')}&background=e91e63&color=ffffff&size=128`;
+
+  return (
+    <div ref={ref} className="kot3-profile-drawer" role="menu" aria-label={t.msg_new_chat || 'New chat'}>
+      <div className="kot3-profile-drawer-head">
+        <div className="kot3-profile-drawer-meta">
+          <div className="kot3-profile-drawer-name">{lang === 'ht' ? 'Nouvo chat' : 'New chat'}</div>
+          <div className="kot3-profile-drawer-sub">
+            {loading
+              ? (lang === 'ht' ? 'Ap chèche…' : 'Loading…')
+              : (lang === 'ht'
+                  ? `${users.length} kontak disponib`
+                  : `${users.length} contacts`)}
+          </div>
+        </div>
+      </div>
+      <div className="kot3-profile-drawer-list">
+        {users.map((u) => (
+          <button
+            type="button"
+            key={u.id}
+            role="menuitem"
+            className="kot3-profile-drawer-item"
+            disabled={loading || pickedId !== null}
+            onClick={() => {
+              setPickedId(u.id);
+              onPickUser?.(u);
+            }}
+          >
+            <span className="ico">
+              {pickedId === u.id ? (
+                <i className="fas fa-spinner fa-spin" aria-hidden="true" />
+              ) : (
+                <img src={avatarOf(u)} alt="" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} />
+              )}
+            </span>
+            <span>@{u.username}</span>
+          </button>
+        ))}
+        {!loading && users.length === 0 && (
+          <div style={{ padding: '14px', fontSize: 12, color: 'var(--text-secondary)', textAlign: 'center' }}>
+            {lang === 'ht' ? 'Pa gen kontak disponib.' : 'No contacts yet.'}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Conversation card ──────────────────────────────────────────────────────
 
 function ConversationCard({
@@ -412,7 +495,17 @@ export function MessengerHome({
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [profileOpen, setProfileOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
+  // Phase 9+ — search bar (MessengerHome) now reaches BOTH the user's
+  // existing threads AND the platform-wide user directory via
+  // /api/chat/search/global_search/. Without this, a brand-new user
+  // with 0 threads would see an empty search result set no matter
+  // what they typed. ``globalLoading`` drives a small "Searching…"
+  // hint so the empty-state doesn't flash a false "No results" for
+  // the 200–800ms the request takes on a cold DB.
+  const [globalMatches, setGlobalMatches] = useState([]);
+  const [globalLoading, setGlobalLoading] = useState(false);
 
   // Update timestamps every 60s so "1 m" → "2 m" rolls automatically
   // (per spec: "Automatically update. Never require refresh.")
@@ -420,6 +513,42 @@ export function MessengerHome({
     const id = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(id);
   }, []);
+
+  // Debounced platform-wide search. 300ms is a comfortable lag for a
+  // human-typed query (most keystroke clusters land inside 200ms; 300
+  // keeps the API hit count < 4 per second on a fast typist). The
+  // ``active`` flag is the standard pattern for cancelling an
+  // in-flight async when the dep changes — simpler than
+  // AbortController and never throws ``CanceledError`` into the
+  // console when the user keeps typing. Minimum 2 chars before we
+  // hit the API; below that we just clear the bucket so a single
+  // keystroke never fans out an N+1 search.
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) {
+      setGlobalMatches([]);
+      setGlobalLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setGlobalLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await chatService.searchGlobal(q);
+        if (!active) return;
+        const users = (res && res.data && Array.isArray(res.data.users)) ? res.data.users : [];
+        setGlobalMatches(users);
+      } catch (_e) {
+        if (active) setGlobalMatches([]);
+      } finally {
+        if (active) setGlobalLoading(false);
+      }
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [search]);
 
   // Touch `now` so React doesn't drop the dependency when nothing else
   // changes; the formatSmartTime path reads Date.now() directly anyway.
@@ -474,23 +603,109 @@ export function MessengerHome({
 
   // Search applies across people / groups / messages / etc. We surface
   // a top "people" row of matching contacts when no convo match is found.
+  // Each entry is tagged ``_source`` ('thread' = existing relationship,
+  // 'global' = platform-wide search) so the click handler can decide
+  // whether to open the existing thread or create a new one.
   const peopleMatches = useMemo(() => {
     if (!search.trim()) return [];
     const q = search.trim().toLowerCase();
     const seen = new Set();
     const out = [];
+    // 1) Existing thread participants win. These are people the user
+    //    already chats with — surfacing them first is the "you probably
+    //    meant this person" UX.
     (threads || []).forEach(x => {
       const other = (x.participants || []).find(p => p.id !== user?.id);
-      if (!other) return;
+      if (!other || seen.has(other.id)) return;
       const username = (other.username || '').toLowerCase();
       const status = (other.profile?.status_text || '').toLowerCase();
-      if ((username.includes(q) || status.includes(q)) && !seen.has(other.id)) {
+      if (username.includes(q) || status.includes(q)) {
         seen.add(other.id);
-        out.push(other);
+        out.push({ ...other, _source: 'thread', _thread: x });
       }
     });
-    return out.slice(0, 5);
-  }, [search, threads, user]);
+    // 2) Platform-wide search fills the rest. Deduped against thread
+    //    matches so the same person doesn't appear twice. We also
+    //    exclude the current user — the BE excludes the requester
+    //    server-side but a defensive client check is cheap and
+    //    makes the contract obvious to future readers.
+    (globalMatches || []).forEach(gUser => {
+      if (!gUser || gUser.id === user?.id || seen.has(gUser.id)) return;
+      const username = (gUser.username || '').toLowerCase();
+      if (!username.includes(q)) return;
+      seen.add(gUser.id);
+      out.push({ ...gUser, _source: 'global' });
+    });
+    return out.slice(0, 10);
+  }, [search, threads, user, globalMatches]);
+
+  // ── New chat flow ───────────────────────────────────────────────────────────
+  // When the user taps the "+" icon in the home header we open a contact
+  // drawer (NewChatDrawer below). Picking a contact creates a thread via
+  // chatService.createThread(userId) and routes the user into the existing
+  // conversation pane. We deliberately route to onOpenThread (instead of
+  // hot-creating a temp thread as Kot3Chat does inline) so a future error
+  // path (network failure) leaves the drawer open with the toast surfacing.
+  const handleNewChat = async (targetUser) => {
+    if (!targetUser?.id) return;
+    try {
+      const res = await chatService.createThread(targetUser.id);
+      const thread = res?.data;
+      if (thread) {
+        onOpenThread?.(thread);
+        setNewChatOpen(false);
+      } else {
+        // 200-but-empty-body: surface a toast + leave drawer open so the user can retry.
+        showToast?.(lang === 'ht'
+          ? 'Pa ka kòmanse chat la.'
+          : 'Could not start chat.',
+          'exclamation-triangle');
+      }
+    } catch (err) {
+      const msg = lang === 'ht'
+        ? 'Pa ka kòmanse chat la.'
+        : 'Could not start chat.';
+      showToast?.(msg, 'exclamation-triangle');
+    }
+  };
+
+  // Pick a person from the search bar's "People" section. Existing
+  // thread match → open the thread. Global match → create a new
+  // thread (idempotent on the BE: returns the existing one if any)
+  // and route into the conversation pane. The toast on the global
+  // path gives immediate feedback during the ~150ms the network
+  // round-trip takes on localhost; the BE is the persistence-of-truth
+  // so a flaky connection surfaces an error toast and the search
+  // list remains intact for retry.
+  const handlePickPerson = async (match) => {
+    if (!match || !match.id) return;
+    if (match._source === 'thread' && match._thread) {
+      onOpenThread?.(match._thread);
+      return;
+    }
+    try {
+      showToast?.(
+        lang === 'ht'
+          ? `Ap prepare chat ak ${match.username}…`
+          : `Starting chat with ${match.username}…`,
+        'spinner fa-spin',
+      );
+      const res = await chatService.createThread(match.id);
+      if (res?.data) {
+        onOpenThread?.(res.data);
+      } else {
+        showToast?.(
+          lang === 'ht' ? 'Pa ka kòmanse chat la.' : 'Could not start chat.',
+          'exclamation-triangle',
+        );
+      }
+    } catch (_e) {
+      showToast?.(
+        lang === 'ht' ? 'Pa ka kòmanse chat la.' : 'Could not start chat.',
+        'exclamation-triangle',
+      );
+    }
+  };
 
   const profileItems = [
     { key: 'profile',  icon: 'fa-user',          label: t.msg_profile_menu_profile },
@@ -548,6 +763,8 @@ export function MessengerHome({
           setSearch={setSearch}
           onProfileOpen={() => setProfileOpen((v) => !v)}
           showToast={showToast}
+          onOpenNewChat={() => { setNewChatOpen(true); setProfileOpen(false); }}
+          onProfileItem={onProfileItem}
         />
         <SearchBar search={search} setSearch={setSearch} t={t} />
         <FilterChips active={filter} counts={counts} onChange={setFilter} t={t} />
@@ -561,6 +778,13 @@ export function MessengerHome({
           <ProfileDrawer user={user} t={t} onClose={() => setProfileOpen(false)}
             items={profileItems} onItemClick={onProfileItem} />
         )}
+        <NewChatDrawer
+          isOpen={newChatOpen}
+          onClose={() => setNewChatOpen(false)}
+          onPickUser={handleNewChat}
+          t={t}
+          lang={lang}
+        />
       </div>
     );
   }
@@ -576,6 +800,8 @@ export function MessengerHome({
           setSearch={setSearch}
           onProfileOpen={() => setProfileOpen((v) => !v)}
           showToast={showToast}
+          onOpenNewChat={() => { setNewChatOpen(true); setProfileOpen(false); }}
+          onProfileItem={onProfileItem}
         />
         <SearchBar search={search} setSearch={setSearch} t={t} />
         <FilterChips active={filter} counts={counts} onChange={setFilter} t={t} />
@@ -589,6 +815,13 @@ export function MessengerHome({
           <ProfileDrawer user={user} t={t} onClose={() => setProfileOpen(false)}
             items={profileItems} onItemClick={onProfileItem} />
         )}
+        <NewChatDrawer
+          isOpen={newChatOpen}
+          onClose={() => setNewChatOpen(false)}
+          onPickUser={handleNewChat}
+          t={t}
+          lang={lang}
+        />
       </div>
     );
   }
@@ -604,6 +837,8 @@ export function MessengerHome({
         setSearch={setSearch}
         onProfileOpen={() => setProfileOpen((v) => !v)}
         showToast={showToast}
+        onOpenNewChat={() => { setNewChatOpen(true); setProfileOpen(false); }}
+        onProfileItem={onProfileItem}
       />
       <SearchBar search={search} setSearch={setSearch} t={t} />
       <FilterChips active={filter} counts={counts} onChange={setFilter} t={t} />
@@ -635,7 +870,7 @@ export function MessengerHome({
           </div>
         )}
         {search.trim() && peopleMatches.map((p, idx) => (
-          <div key={`p-${p.id}`} className="kot3-card kot3-card-people" onClick={() => showToast?.(lang === 'ht' ? `Ouvri chat ak ${p.username}` : `Open chat with ${p.username}`, 'arrow-right')}>
+          <div key={`p-${p.id}`} className="kot3-card kot3-card-people" onClick={() => handlePickPerson(p)}>
             <div className="kot3-card-avatar-col">
               <img className="kot3-card-avatar" src={p.avatar || p.profile?.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(p.username || '?')}&background=e91e63&color=ffffff&size=128`} alt={p.username || ''} />
             </div>
@@ -660,8 +895,23 @@ export function MessengerHome({
             hint={lang === 'ht' ? 'Kòmanse yon nouvo chat.' : 'Start a new chat.'}
           />
         )}
-        {search.trim() && filteredThreads.length === 0 && peopleMatches.length === 0 && (
+        {search.trim() && filteredThreads.length === 0 && peopleMatches.length === 0 && !globalLoading && (
           <EmptyState icon="fa-search" title={t.msg_no_results} hint={t.msg_no_results_hint} />
+        )}
+
+        {/* Live "searching…" hint while the global API is in flight. Kept
+            lightweight (no spinner element) so it doesn't compete with
+            the typing caret for visual attention — just a small
+            right-aligned label that disappears the moment the response
+            lands. Hidden when the query is too short to have triggered
+            the API (length < 2). */}
+        {globalLoading && search.trim().length >= 2 && (
+          <div className="kot3-card-section-label" style={{ textAlign: 'center', opacity: 0.65, fontSize: 12 }}>
+            <span>
+              <i className="fas fa-spinner fa-spin" aria-hidden="true" />{' '}
+              {lang === 'ht' ? 'Ap chèche nan tout rezo a…' : 'Searching the whole network…'}
+            </span>
+          </div>
         )}
       </div>
 
@@ -669,13 +919,20 @@ export function MessengerHome({
         <ProfileDrawer user={user} t={t} onClose={() => setProfileOpen(false)}
           items={profileItems} onItemClick={onProfileItem} />
       )}
+      <NewChatDrawer
+        isOpen={newChatOpen}
+        onClose={() => setNewChatOpen(false)}
+        onPickUser={handleNewChat}
+        t={t}
+        lang={lang}
+      />
     </div>
   );
 }
 
 // ─── Sub-components used inline by Header ────────────────────────────────────
 
-function Header({ user, avatar, t, onProfileOpen, search, setSearch, showToast }) {
+function Header({ user, avatar, t, onProfileOpen, search, setSearch, showToast, onOpenNewChat, onProfileItem }) {
   // Import at top-level to avoid a require cycle.
   React.useEffect(() => {
     document.body.classList.add('kot3-messenger-home-active');
@@ -729,7 +986,7 @@ function Header({ user, avatar, t, onProfileOpen, search, setSearch, showToast }
           className="kot3-iconbtn"
           aria-label={t.msg_new_chat}
           title={t.msg_new_chat}
-          onClick={onIconClick(() => showToast?.(lang === 'ht' ? 'Nouvo chat…' : 'New chat…', 'plus'))}
+          onClick={onIconClick(() => onOpenNewChat?.())}
         >
           <i className="fas fa-plus" aria-hidden="true" />
         </button>
@@ -738,7 +995,7 @@ function Header({ user, avatar, t, onProfileOpen, search, setSearch, showToast }
           className="kot3-iconbtn"
           aria-label={t.msg_new_group}
           title={t.msg_new_group}
-          onClick={onIconClick(() => showToast?.(lang === 'ht' ? 'Kreye group…' : 'Create group…', 'users'))}
+          onClick={onIconClick(() => showToast?.(lang === 'ht' ? 'Kreyasyon gwoup ap vini byento' : 'Group chats — coming soon', 'info-circle'))}
         >
           <i className="fas fa-users" aria-hidden="true" />
         </button>
@@ -760,7 +1017,7 @@ function Header({ user, avatar, t, onProfileOpen, search, setSearch, showToast }
           className="kot3-iconbtn"
           aria-label={t.msg_settings}
           title={t.msg_settings}
-          onClick={onIconClick(() => showToast?.(t.msg_settings, 'cog'))}
+          onClick={onIconClick(() => (onProfileItem ? onProfileItem('settings') : showToast?.(t.msg_settings, 'cog')))}
         >
           <i className="fas fa-cog" aria-hidden="true" />
         </button>

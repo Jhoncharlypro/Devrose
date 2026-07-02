@@ -4,7 +4,7 @@
  * Top-level React component for the messenger-style chat panel.
  *
  * Module-level constants (palettes, theme registry, ID helpers, story TTL,
- * WS URL builder) live in `./kot3chat/constants.js`. Synthesized Web Audio
+ * WS URL builder) live in `./kot3chat/params.js`. Synthesized Web Audio
  * beeps live in `./kot3chat/audioUtils.js`. This file owns all React state,
  * refs, effects, and the rendered JSX.
  */
@@ -18,7 +18,7 @@ import {
   resolveInitialTheme,
   sameId, isTempId, STORY_TTL_MS,
   buildChatSocketUrl,
-} from './kot3chat/constants';
+} from './kot3chat/params';
 import {
   playSendBeep, playReceiveBeep, playConnectedChime,
   startCallingSounds, stopCallingSounds,
@@ -769,6 +769,28 @@ const Kot3Chat = ({ lang, user, showToast }) => {
             if (showToast) showToast(lang === 'ht' ? 'Mesaj modifye' : 'Message edited', 'info-circle');
             break;
 
+          case 'message_deleted':
+            // Phase 9 — soft-delete broadcast from BE (covers both
+            // the REST DELETE path and the WS ``delete_message`` path;
+            // idempotent because the reducer short-circuits on
+            // duplicate IDs).  The chat pane renders tombstones via
+            // ``getFilteredMessages`` which filters by ``deletedMsgIds``.
+            setDeletedMsgIds(prev => prev.includes(data.message_id) ? prev : [...prev, data.message_id]);
+            // If the deleted message was the thread's ``last_message``
+            // preview, drop the preview so the sidebar shows the
+            // "Say hello…" placeholder rather than content from a
+            // tombstoned message.  The next ``new_message`` event
+            // repopulates it.
+            setThreads(prevT => prevT.map(t => {
+              if (!sameId(t.id, data.thread_id)) return t;
+              if (t.last_message?.id === data.message_id) {
+                return { ...t, last_message: null };
+              }
+              return t;
+            }));
+            if (showToast) showToast(lang === 'ht' ? 'Mesaj efase' : 'Message deleted', 'info-circle');
+            break;
+
           case 'message_delivered':
             setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, is_delivered: true, status: 'delivered' } : m));
             break;
@@ -839,6 +861,27 @@ const Kot3Chat = ({ lang, user, showToast }) => {
                 last_seen: data.last_seen || prev[data.user_id]?.last_seen || null,
                 is_online: data.status === 'online'
               }
+            }));
+            break;
+
+          case 'thread_setting_updated':
+            // Phase 9 — per-user thread prefs (pin / archive / mute /
+            // request-ignore) synced from the BE to all THIS user's
+            // devices.  BE only includes keys that actually changed
+            // (see ``update_thread_setting`` in consumers.py) so we
+            // patch conditionally to avoid clobbering untouched
+            // fields.  ``is_muted`` and ``is_request`` come pre-
+            // computed from the BE (muted_hours → boolean, request-
+            // ignored → is_request = not ignored).
+            setThreads(prevT => prevT.map(t => {
+              if (!sameId(t.id, data.thread_id)) return t;
+              const next = { ...t };
+              const u = data.updates || {};
+              if ('is_pinned'   in u) next.is_pinned   = !!u.is_pinned;
+              if ('is_archived' in u) next.is_archived = !!u.is_archived;
+              if ('is_muted'    in u) next.is_muted    = !!u.is_muted;
+              if ('is_request'  in u) next.is_request  = !!u.is_request;
+              return next;
             }));
             break;
 
@@ -1672,8 +1715,14 @@ const Kot3Chat = ({ lang, user, showToast }) => {
       ...prev
     ]);
 
-    // Check if the recipient is online to make a real WebSocket call
-    const isReceiverOnline = onlineUsers[contactId] !== undefined;
+    // Check if the recipient is online to make a real WebSocket call.
+    // NOTE: must be ``?.status === 'online'`` (not ``!== undefined``) — the
+    // Phase 9 presence_snapshot REPLACES the onlineUsers map with the
+    // server's current online set, so users who went offline are no
+    // longer in the map at all. ``!== undefined`` would only be true
+    // for users we have *seen* in presence; the new contract is that
+    // the presence map is "currently online" only.
+    const isReceiverOnline = onlineUsers[contactId]?.status === 'online';
     if (wsRef.current?.readyState === WebSocket.OPEN && isReceiverOnline) {
       wsRef.current.send(JSON.stringify({
         type: 'call_user',

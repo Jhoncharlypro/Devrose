@@ -25,7 +25,9 @@ from .views import (
     CourseViewSet, EnrollmentViewSet,
     UserProgressViewSet, SessionMemoryViewSet,
     FavoriteViewSet, ProfileViewSet, BlockViewSet, MuteViewSet,
+    ActivityLogViewSet,
     ChatThreadViewSet, UserListViewSet, ChatSearchViewSet, StoryViewSet,
+    CallLogViewSet, ChatPresenceViewSet,
     LiveRoomViewSet, AIGenerateViewSet,
     AuditLogViewSet, CallHistoryViewSet, ChatGroupViewSet, PinnedMessageViewSet,
     ScheduledMessageViewSet, ChatFolderViewSet, PremiumSubscriptionViewSet,
@@ -50,10 +52,18 @@ router.register(r'favorites', FavoriteViewSet, basename='favorite')
 router.register(r'profile', ProfileViewSet, basename='profile')
 router.register(r'blocks', BlockViewSet, basename='blocks')
 router.register(r'mutes', MuteViewSet, basename='mutes')
+# Profile Activity Log (read-only, scoped to the authenticated user).
+# Mounted under ``profile/activity`` so the URL hierarchy reads as
+# ``/api/profile/activity/`` next to the existing profile endpoints.
+router.register(r'profile/activity', ActivityLogViewSet, basename='profile-activity')
 router.register(r'chat/threads', ChatThreadViewSet, basename='chat-thread')
 router.register(r'chat/users', UserListViewSet, basename='chat-users')
 router.register(r'chat/search', ChatSearchViewSet, basename='chat-search')
 router.register(r'chat/stories', StoryViewSet, basename='chat-stories')
+# Phase 9 — server-side call history
+router.register(r'chat/calls', CallLogViewSet, basename='chat-calls')
+# Phase 9 — REST presence snapshot (cold-start reconciliation)
+router.register(r'chat/presence', ChatPresenceViewSet, basename='chat-presence')
 router.register(r'live/rooms', LiveRoomViewSet, basename='live-rooms')
 router.register(r'ai', AIGenerateViewSet, basename='ai')
 router.register(r'audit', AuditLogViewSet, basename='audit')

@@ -1,5 +1,17 @@
-import React from 'react';const Header = ({ lang, translations, toggleTheme, toggleSettings, darkMode, onOpenChat, unreadChatCount = 0 }) => {
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
+import { SHEETS } from '../routes/sheets';
+
+const Header = ({ lang, translations, toggleTheme, darkMode, onOpenChat, unreadChatCount = 0 }) => {
   const t = translations[lang];
+  // The cog icon used to call `setIsSettingsOpen(true)` on a state
+  // slice in App.jsx; it now navigates to the dedicated /sheet/settings
+  // route so the Settings sheet is bare-rendered (consistent with
+  // Atelier / PrivacySpace / Kot3Profile), deep-linkable, and the
+  // browser-back button works. SHEETS.SETTINGS is the single source
+  // of truth so a future rename stays one-edit.
+  const navigate = useNavigate();
+  const openSettings = () => navigate(SHEETS.SETTINGS);
 
   return (
     <header style={{
@@ -16,7 +28,7 @@ import React from 'react';const Header = ({ lang, translations, toggleTheme, tog
       borderBottom: '1px solid var(--border-color)',
       gap: '10px'
     }}>
-      <button className="icon-btn" onClick={toggleSettings} title={t.settings} style={{ flexShrink: 0 }}>
+      <button className="icon-btn" onClick={openSettings} title={t.settings} style={{ flexShrink: 0 }}>
         <i className="fas fa-cog"></i>
       </button>
 

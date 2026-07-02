@@ -4,15 +4,13 @@ const Tabs = ({ activeTab, setActiveTab, lang, translations }) => {
   const t = translations[lang];
 
   const tabs = [
-    { id: 'commerce', label: t.tab_courses },
-    { id: 'roadmap', label: t.tab_roadmap },
-    { id: 'favori', label: 'Favori' },
-    { id: 'terminal', label: t.tab_simulator },
+    { id: 'explore', label: t.tab_explore || 'Explore' },
+    { id: 'jaden_woz', label: t.tab_jaden_woz || 'Jaden Woz' },
+    { id: 'profile', label: t.tab_profile || 'Profile' },
     { id: 'live_classroom', label: 'Live Classroom' },
     { id: 'classroom', label: 'Classroom' },
     { id: 'kot3chat', label: 'Chat' },
-    { id: 'rules', label: t.tab_rules },
-    { id: 'description', label: t.tab_registration },
+    { id: 'explore_detail', label: t.tab_registration },
   ];
 
   return (

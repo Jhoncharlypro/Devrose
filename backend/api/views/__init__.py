@@ -17,8 +17,8 @@ from .progress import UserProgressViewSet
 from .session import SessionMemoryViewSet
 from .live_room import LiveRoomViewSet
 from .favorite import FavoriteViewSet
-from .profile import ProfileViewSet, BlockViewSet, MuteViewSet
-from .chat import ChatThreadViewSet, UserListViewSet, ChatSearchViewSet, StoryViewSet
+from .profile import ProfileViewSet, BlockViewSet, MuteViewSet, ActivityLogViewSet
+from .chat import ChatThreadViewSet, UserListViewSet, ChatSearchViewSet, StoryViewSet, CallLogViewSet, ChatPresenceViewSet
 from .ai import AIGenerateViewSet
 from .healthz import healthz  # /api/healthz/ — Supabase probe endpoint.
 from .root import api_root  # GET / — JSON API root (replaces the old Vite-served index.html).

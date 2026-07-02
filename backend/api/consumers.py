@@ -3,7 +3,9 @@ import time
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from asgiref.sync import sync_to_async
 from api.models import ChatThread, Message, MessageReaction
+from api.models.part4 import CallLog as Part4CallLog
 from django.contrib.auth.models import User
+from django.db.models import Q
 from django.utils import timezone
 from api import presence
 
@@ -245,6 +247,14 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             'username': self.user.username
         })
 
+        # Send an initial presence snapshot so the FE can reconcile
+        # its localStorage map on every (re)connect — fixes the
+        # "stale onlineUsers" bug where a user marked online in
+        # localStorage stays green after they actually went offline.
+        # Without this, a user who closes their tab while the server
+        # stays up keeps showing as online forever.
+        await self._send_presence_snapshot()
+
     async def disconnect(self, close_code):
         self.connected = False
         # Note: Kot3ChatConsumer never joins a ClassroomLiveConsumer room
@@ -339,6 +349,69 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             profile.save(update_fields=['last_seen'])
         except Exception:
             pass
+
+    async def _build_presence_snapshot(self):
+        """
+        Return a ``{user_id: {username, last_seen}}`` dict of every
+        user currently online (across all Daphne workers — backed by
+        Redis SMEMBERS). Used by the ``connected`` envelope and the
+        ``get_presence_snapshot`` WS handler so the FE can reconcile
+        stale localStorage entries on every (re)connect.
+
+        One batched query: ``User.objects.filter(id__in=online_set)``,
+        so cost is O(1) Redis round-trip + one indexed SELECT.
+        """
+        from django.contrib.auth.models import User
+        from asgiref.sync import sync_to_async
+
+        online_set = await presence.online_user_ids_async()
+        if not online_set:
+            return {}
+
+        def fetch_users():
+            rows = (
+                User.objects
+                .filter(id__in=online_set)
+                .values('id', 'username', 'profile__last_seen')
+            )
+            return {
+                r['id']: {
+                    'username': r['username'],
+                    'last_seen': (
+                        r['profile__last_seen'].isoformat()
+                        if r['profile__last_seen'] else None
+                    ),
+                }
+                for r in rows
+            }
+
+        return await sync_to_async(fetch_users)()
+
+    async def _send_presence_snapshot(self):
+        """Send the FE a ``presence_snapshot`` envelope with the current
+        online set. The hook handler REPLACES its localStorage map
+        with this — so users who actually went offline drop from the
+        dot map on every (re)connect.
+        """
+        snapshot = await self._build_presence_snapshot()
+        await self.send_json({
+            'type': 'presence_snapshot',
+            'online': snapshot,
+            'ts': timezone.now().isoformat(),
+        })
+
+    async def presence_snapshot(self, event):
+        """Server-side group_send fanout (a future "force-refresh all"
+        path could use this). Today only the per-connection
+        ``_send_presence_snapshot`` path is used, but registering the
+        channel-layer handler keeps the contract symmetric with the
+        other fanout events so we don't have to rewrite consumers if
+        the broadcast path is added later."""
+        await self.send_json({
+            'type': 'presence_snapshot',
+            'online': event.get('online', {}),
+            'ts': event.get('ts') or timezone.now().isoformat(),
+        })
 
     async def receive_json(self, content):
         msg_type = content.get('type')
@@ -439,6 +512,10 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
         elif msg_type == 'call_user':
             target_user_id = content.get('target_user_id')
             call_type = content.get('call_type', 'audio')
+            # Phase 9: persist CallLog row so the history survives logouts
+            # + multi-device consistency. The thread is the most-recent 1-on-1
+            # thread between the two participants, when present.
+            await self._persist_call_attempt(target_user_id, call_type, status='ringing')
             await self.channel_layer.group_send(
                 f'kot3_user_{target_user_id}',
                 {
@@ -451,6 +528,7 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
 
         elif msg_type == 'call_accepted':
             caller_id = content.get('caller_id')
+            await self._mark_call_connected(caller_id)
             await self.channel_layer.group_send(
                 f'kot3_user_{caller_id}',
                 {
@@ -461,6 +539,7 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
 
         elif msg_type == 'call_declined':
             target_user_id = content.get('target_user_id')
+            await self._finalize_call_with_peer(target_user_id, status='declined')
             await self.channel_layer.group_send(
                 f'kot3_user_{target_user_id}',
                 {
@@ -490,6 +569,40 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             forwarded_from_id = content.get('forwarded_from_id')
             if target_thread_id and forwarded_from_id and str(forwarded_from_id).isdigit():
                 await self.forward_message(int(forwarded_from_id), target_thread_id)
+
+        elif msg_type == 'delete_message':
+            # Phase 9 — soft-delete broadcast. We mirror the REST DELETE
+            # behaviour so the WS path is the live sync layer; the REST
+            # endpoint is the persistence-of-truth.
+            message_id = content.get('message_id')
+            if message_id and str(message_id).isdigit():
+                await self.delete_message_for_everyone(int(message_id))
+
+        elif msg_type == 'thread_setting':
+            # Phase 9 — client can sync per-user thread flags (pinned,
+            # archived, muted_duration, is_request_ignored) over WS for
+            # snappier UX. The user-visible pre-flight POST to REST is
+            # preferred for safety, but this path lets the FE hand off
+            # optimistic updates without round-tripping.
+            thread_id = content.get('thread_id')
+            updates = content.get('updates') or {}
+            if thread_id and isinstance(updates, dict) and updates:
+                await self.update_thread_setting(thread_id, updates)
+
+        elif msg_type == 'get_presence_snapshot':
+            # Phase 9 — FE can ask for a fresh presence snapshot at
+            # any time. The hook calls this on ws.onopen and after a
+            # 4401 reconnect to reconcile stale localStorage entries.
+            await self._send_presence_snapshot()
+
+        elif msg_type == 'heartbeat':
+            # Phase 9 — client heartbeat. Updates ``last_seen`` on
+            # the profile so other devices see an accurate "last seen
+            # X m ago" badge, and returns a fresh presence snapshot
+            # so the client doesn't drift from server truth.
+            # Recommended cadence: 60s.
+            await self.update_last_seen()
+            await self._send_presence_snapshot()
 
         elif msg_type == 'webrtc_signal':
             target_user_id = content.get('target_user_id')
@@ -894,6 +1007,222 @@ class Kot3ChatConsumer(AsyncJsonWebsocketConsumer):
             'username': event['username'],
             'action': event['action'],
         })
+
+    async def message_deleted(self, event):
+        await self.send_json({
+            'type': 'message_deleted',
+            'thread_id': event['thread_id'],
+            'message_id': event['message_id'],
+            'deleted_by_id': event.get('deleted_by_id'),
+            'deleted_at': event.get('deleted_at'),
+        })
+
+    async def thread_setting_updated(self, event):
+        await self.send_json({
+            'type': 'thread_setting_updated',
+            'thread_id': event['thread_id'],
+            'user_id': event['user_id'],
+            'updates': event['updates'],
+        })
+
+    async def delete_message_for_everyone(self, message_id: int):
+        """Phase 9 — soft-delete. Sender-only authorization performed via REST
+        endpoint; this WS handler exists to keep clients in sync when the
+        caller used REST (REST already broadcast, so receiving the same
+        event twice is idempotent because the bubble is already a tombstone).
+        """
+        def soft_delete_sync():
+            from django.utils import timezone as _tz
+            from api.models import Message
+            try:
+                msg = Message.objects.select_related('thread').get(id=message_id)
+            except Message.DoesNotExist:
+                return {'error': 'Message not found'}
+            if self.user not in msg.thread.participants.all():
+                return {'error': 'Not a participant'}
+            if msg.sender_id != self.user.id:
+                return {'error': 'Only the author may delete.'}
+            if msg.deleted_at:
+                return {'already': True,
+                        'thread_id': msg.thread_id,
+                        'deleted_by_id': msg.deleted_by_id,
+                        'deleted_at': msg.deleted_at.isoformat()}
+            msg.deleted_at = _tz.now()
+            msg.deleted_by = self.user
+            msg.save(update_fields=['deleted_at', 'deleted_by'])
+            return {
+                'thread_id': msg.thread_id,
+                'deleted_by_id': msg.deleted_by_id,
+                'deleted_at': msg.deleted_at.isoformat(),
+            }
+        result = await sync_to_async(soft_delete_sync)()
+        if 'error' in result:
+            await self.send_json({'type': 'error', 'message': result['error']})
+            return
+        # Broadcast to every device in the thread room so the bubble collapses.
+        await self.channel_layer.group_send(
+            f'kot3_thread_{result["thread_id"]}',
+            {
+                'type': 'message_deleted',
+                'thread_id': result['thread_id'],
+                'message_id': message_id,
+                'deleted_by_id': result['deleted_by_id'],
+                'deleted_at': result['deleted_at'],
+            },
+        )
+
+    async def update_thread_setting(self, thread_id, updates):
+        """Sync per-user thread flags over WS. Mirrors the REST actions so a
+        second device can apply the same change instantly."""
+        from api.models import UserThreadSetting, ChatThread
+        from django.utils import timezone as _tz
+        from datetime import timedelta
+
+        def sync():
+            try:
+                thread = ChatThread.objects.get(id=thread_id)
+            except ChatThread.DoesNotExist:
+                return {'error': 'Thread not found'}
+            if self.user not in thread.participants.all():
+                return {'error': 'Not a participant'}
+            s, _ = UserThreadSetting.objects.get_or_create(user=self.user, thread=thread)
+            applied = {}
+            if 'is_pinned' in updates:
+                s.is_pinned = bool(updates['is_pinned'])
+                applied['is_pinned'] = s.is_pinned
+            if 'is_archived' in updates:
+                s.is_archived = bool(updates['is_archived'])
+                applied['is_archived'] = s.is_archived
+            if 'muted_hours' in updates:
+                hours = int(updates['muted_hours'] or 0)
+                hours = max(0, min(hours, 24 * 30))
+                s.muted_until = (_tz.now() + timedelta(hours=hours)) if hours else None
+                applied['is_muted'] = bool(s.muted_until)
+            if 'is_request_ignored' in updates:
+                s.is_request_ignored = bool(updates['is_request_ignored'])
+                applied['is_request'] = not s.is_request_ignored
+            s.save()
+            return {
+                'thread_id': thread.id,
+                'updates': applied,
+            }
+        result = await sync_to_async(sync)()
+        if 'error' in result:
+            await self.send_json({'type': 'error', 'message': result['error']})
+            return
+        # Send back ONLY to this user (per-user pref — not the room).
+        await self.channel_layer.group_send(
+            f'kot3_user_{self.user.id}',
+            {
+                'type': 'thread_setting_updated',
+                'thread_id': result['thread_id'],
+                'user_id': self.user.id,
+                'updates': result['updates'],
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 9 — server-side CallLog persistence.
+    #
+    # The WS ``call_user`` / ``call_accepted`` / ``call_declined`` branches
+    # in ``receive_json`` call these three helpers to write a row in
+    # ``api.models.part4.CallLog``. We use the part4 model (kind / duration
+    # / status enums) rather than a duplicate model — it was already
+    # migrated by part4 and powers the FE's CallHistoryPanel.
+    #
+    # ``self.last_call_log_id`` is stashed on the consumer instance so
+    # subsequent state transitions can resolve the row we just created
+    # without a re-query. The id is intentionally per-consumer (per
+    # channel) so two parallel calls from the same user don't collide
+    # across tabs/devices.
+    # ------------------------------------------------------------------
+    async def _persist_call_attempt(self, target_user_id, call_type, status='outgoing'):
+        def persist_sync():
+            from api.models.part4 import CallLog
+            from api.models import ChatThread
+            from django.contrib.auth.models import User
+            valid_kind = call_type if call_type in ('audio', 'video') else 'audio'
+            try:
+                target = User.objects.get(id=target_user_id)
+            except User.DoesNotExist:
+                return {'error': 'Target user not found'}
+            # Look up the 1-on-1 thread (if any) so the CallLog row links
+            # into the same conversation the user is staring at.
+            shared_thread = (
+                ChatThread.objects
+                .filter(participants=self.user, is_group=False)
+                .filter(participants=target)
+                .first()
+            )
+            log = CallLog.objects.create(
+                caller=self.user, callee=target, kind=valid_kind,
+                status=status, duration=0, thread=shared_thread,
+            )
+            self.last_call_log_id = log.id
+            self.last_callee_id = target.id
+            return {'id': log.id, 'kind': log.kind, 'status': log.status}
+
+        result = await sync_to_async(persist_sync)()
+        return result
+
+    async def _mark_call_connected(self, caller_id):
+        def mark_sync():
+            from api.models.part4 import CallLog
+            from django.utils import timezone as _tz
+            qs = (
+                CallLog.objects
+                .filter(caller_id=caller_id, callee=self.user,
+                        status__in=('outgoing', 'incoming'))
+                .order_by('-started_at')
+            )
+            log = qs.first()
+            if not log:
+                return {'error': 'No active call to mark'}
+            log.status = 'completed'
+            log.ended_at = _tz.now()
+            log.save(update_fields=['status', 'ended_at'])
+            self.last_call_log_id = log.id
+            self.last_callee_id = caller_id
+            return {'id': log.id, 'status': log.status}
+
+        return await sync_to_async(mark_sync)()
+
+    async def _finalize_call_with_peer(self, target_user_id, status='rejected'):
+        """Close out a CallLog row. ``status`` is mapped to the part4 enum:
+        ``declined`` → ``rejected``, ``missed`` → ``missed`` (callee never
+        answered), ``completed`` → ``completed`` (caller hung up normally)."""
+        valid_statuses = {c[0] for c in Part4CallLog.STATUS_CHOICES}
+        mapped = 'rejected' if status == 'declined' else (
+            status if status in valid_statuses else 'completed'
+        )
+        def finalize_sync():
+            from django.utils import timezone as _tz
+            # Build a Q-expression so we can OR caller-side / callee-side
+            # without falling back to two separate queries.
+            if target_user_id:
+                call_filter = (
+                    Q(caller=self.user, callee_id=target_user_id)
+                    | Q(caller_id=target_user_id, callee=self.user)
+                )
+            else:
+                call_filter = Q(caller=self.user) | Q(callee=self.user)
+            log = (
+                Part4CallLog.objects
+                .filter(status__in=('outgoing', 'incoming', 'completed'))
+                .filter(call_filter)
+                .order_by('-started_at')
+                .first()
+            )
+            if not log:
+                return {'noop': True}
+            duration = max(0, int((_tz.now() - log.started_at).total_seconds()))
+            log.status = mapped
+            log.duration = duration
+            log.ended_at = _tz.now()
+            log.save(update_fields=['status', 'duration', 'ended_at'])
+            return {'id': log.id, 'status': log.status, 'duration': log.duration}
+
+        return await sync_to_async(finalize_sync)()
 
     # ------------------------------------------------------------------
     # Forward (chat module Step 4)

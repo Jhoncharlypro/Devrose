@@ -11,7 +11,7 @@ const FAQ = ({ lang, translations, courseId = null }) => {
       { q: "Ki jou ak ki lè kou yo ap fèt?", a: "Kou yo ap fèt pandan wikenn (Samdi ak Dimanch) nan apremidi pou pèmèt tout moun ki travay oswa ki gen lòt okipasyon patisipe." },
       { q: "Èske m ap resevwa yon sètifika?", a: "Wi, tout elèv ki fin swiv 80% nan kou a epi ki reyalize pwojè final la ap resevwa yon sètifika dijital pwofesyonèl." },
       { q: "Si m rate yon sesyon, kisa k ap rive?", a: "Pa gen pwoblèm! Tout sesyon Live yo anrejistre an bon kalite. Elèv yo ap gen aksè ak yon platfòm pou revwa yo pandan 6 mwa." },
-      { q: "Kouman pou m peye si m pa gen PayPal?", a: "Nou aksepte peman lokal via MonCash ak Natcash. Klike sou bouton WhatsApp la nan paj detay kou a." },
+      { q: "Kouman mwen ka enskri nan yon kou?", a: "Kontakte yon admin nan espas jesyon kou a (Course Manager) pou w jwenn plis enfòmasyon sou enskripsyon. Nou p ap travay ak fòm peman sou entènèt kounye a." },
       { q: "Èske gen sipò apre kou a fini?", a: "Wi, chak elèv ap rete nan yon kominote ansyen elèv pou kontinye poze kesyon ak pataje pwojè." }
     ],
     en: [
@@ -20,7 +20,7 @@ const FAQ = ({ lang, translations, courseId = null }) => {
       { q: "Which days and at what time will the courses be held?", a: "Courses will be held during weekends (Saturday and Sunday) in the afternoon to allow everyone who works or has other occupations to participate." },
       { q: "Will I receive a certificate?", a: "Yes, all students who have followed 80% of the course and completed the final project will receive a professional digital certificate." },
       { q: "If I miss a session, what happens?", a: "No problem! All Live sessions are recorded in high quality. Students will have access to a platform to review them for 6 months." },
-      { q: "How can I pay if I don't have PayPal?", a: "We accept local payments via MonCash and Natcash. Click on the WhatsApp button in the course details page." },
+      { q: "How do I enroll in a course?", a: "Contact an admin in the Course Manager space to learn about enrollment. We are not processing online payments right now." },
       { q: "Is there support after the course ends?", a: "Yes, each student will remain in a community of former students to continue asking questions and sharing projects." }
     ],
     es: [

@@ -132,11 +132,16 @@ def _supabase_user_payload(supabase_user):
 
 def _sync_local_user(supabase_user):
     payload = _supabase_user_payload(supabase_user)
+    # Phase 9 / Fix A: pre-set ``last_login`` on creation only (defeats
+    # legacy ``auth_user.last_login NOT NULL``). Subsequent sign-ins
+    # intentionally skip it — Django updates ``last_login`` via
+    # ``auth.login()`` elsewhere, not via the sync path.
     user, _ = User.objects.get_or_create(
         email=payload['email'],
         defaults={
             'username': payload['username'],
             'first_name': payload['sub'][:150],
+            'last_login': timezone.now(),
         },
     )
     updated = False
@@ -260,14 +265,55 @@ def _django_signup_response(email, password, requested_username=None):
         final_username = candidate
 
     try:
-        user = User.objects.create_user(username=final_username, email=email, password=password)
-    except IntegrityError:
-        # Race condition: a concurrent signup inserted the same username
-        # between our .exists() check and the INSERT. The DB UNIQUE
-        # constraint fired. Map back to the same friendly code the view
-        # returns as 409 ('Username already taken.') so the FE sees a
-        # uniform error envelope.
-        raise ValueError('username_taken')
+        # ── Phase 9 / Fix A: pre-set ``last_login`` so create_user
+        # doesn't trip the legacy ``auth_user.last_login NOT NULL``
+        # constraint. The companion migration ``0023_*`` makes the
+        # column NULL-able; this workaround remains as a safety net
+        # for any DB that hasn't applied the migration yet. Django's
+        # UserManager accepts arbitrary model fields via **extra_fields.
+        user = User.objects.create_user(
+            username=final_username,
+            email=email,
+            password=password,
+            last_login=timezone.now(),
+        )
+    except IntegrityError as exc:
+        # ── Phase 9 / Fix C: surface the actual failing field
+        # instead of blanket-mapping every integrity error to
+        # 'username_taken'. The IntegrityError message from Django +
+        # the underlying DB driver contains the field name (e.g.
+        # "UNIQUE constraint failed: auth_user.username") so we can
+        # branch on it. Falls through to a generic 'signup_db_error'
+        # code that the signup view maps to a 400 with a non-leaky
+        # message; the underlying error is logged at WARNING so
+        # operators can see the actual cause in the logs.
+        # ``__cause__`` is None when an exception is raised outside
+        # Django's exception chaining (rare but possible). ``str(None)``
+        # returns the literal ``'None'`` (truthy) so the naive
+        # ``str(exc.__cause__) or str(exc) or ''`` would mis-route
+        # every IntegrityError to ``signup_db_error`` in that case.
+        # Use an explicit None check so we always fall through to
+        # ``str(exc)`` when ``__cause__`` is unavailable.
+        cause_raw = str(exc.__cause__) if exc.__cause__ is not None else str(exc)
+        cause = (cause_raw or '').lower()
+        # Log BOTH the raw cause (preserves case for grep-forensics)
+        # AND the lowercased variant (what we actually match on).
+        logger.warning('signup IntegrityError (cause=%r): %s', cause_raw, cause)
+        if 'auth_user.username' in cause or ('username' in cause and 'unique' in cause and 'auth_user' in cause):
+            # UNIQUE on auth_user.username (the standard Django UNIQUE
+            # constraint) — the friendly 409 path the FE already knows.
+            raise ValueError('username_taken')
+        if 'auth_user.email' in cause or ('email' in cause and 'unique' in cause and 'auth_user' in cause):
+            # Defensive: auth.User.email is NOT unique by default, so
+            # this branch only fires if a project-level migration added
+            # a UNIQUE on email. We still pre-check email__iexact
+            # above, so this is purely a "race condition" net.
+            raise ValueError('account_already_exists')
+        # NOT NULL on a non-username column, FK violation, CHECK
+        # constraint failure, etc. — let the FE render a generic
+        # error and let the operator read the WARNING log line above
+        # to see the real cause.
+        raise ValueError('signup_db_error')
     _ensure_profile(user)
     access, refresh = _issue_tokens(user)
     return access, refresh, user
@@ -428,6 +474,16 @@ def signup(request):
             if err == 'username_required':
                 return Response(
                     {'error': 'Username is required.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if err == 'signup_db_error':
+                # Phase 9 / Fix C: an integrity error fired that wasn't
+                # a username/email UNIQUE violation. The operator can
+                # see the real cause in the WARNING log line emitted
+                # in ``_django_signup_response``; the FE gets a
+                # non-leaky 400 with a generic message.
+                return Response(
+                    {'error': 'Signup could not be completed. Please try again.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             return Response(

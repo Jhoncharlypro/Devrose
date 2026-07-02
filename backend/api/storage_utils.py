@@ -40,18 +40,20 @@ logger = logging.getLogger(__name__)
 # Bucket + size + MIME configuration (must agree with setup_supabase.py)
 # ----------------------------------------------------------------------
 _BUCKET_FOR_KIND = {
-    "avatar": "avatars",
-    "cover":  "covers",
-    "image":  "chat-images",
-    "audio":  "audio",
+    "avatar":   "avatars",
+    "cover":    "covers",
+    "image":    "chat-images",
+    "audio":    "audio",
+    "document": "documents",
 }
 # Soft caps. ``setup_supabase.py`` aligns these at the bucket layer so
 # Supabase rejects oversize uploads too -- belt + braces.
 _SIZE_CAPS_BYTES = {
-    "avatar": 2 * 1024 * 1024,    # 2 MB
-    "cover":  5 * 1024 * 1024,    # 5 MB
-    "image":  4 * 1024 * 1024,    # 4 MB
-    "audio":  2 * 1024 * 1024,    # 2 MB (voice notes)
+    "avatar":   2 * 1024 * 1024,    # 2 MB
+    "cover":    5 * 1024 * 1024,    # 5 MB
+    "image":    4 * 1024 * 1024,    # 4 MB
+    "audio":    2 * 1024 * 1024,    # 2 MB (voice notes)
+    "document": 10 * 1024 * 1024,   # 10 MB (PDF / DOCX / XLSX / TXT)
 }
 _MIME_TO_EXT = {
     "image/png":              "png",
@@ -65,6 +67,18 @@ _MIME_TO_EXT = {
     "audio/mp4":              "m4a",
     "audio/wav":              "wav",
     "audio/x-wav":            "wav",
+    # Phase 9 — document attachment MIME types (whitelist only — reject executables).
+    "application/pdf":        "pdf",
+    "application/msword":     "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "text/plain":             "txt",
+    "text/csv":               "csv",
+    "application/json":       "json",
+    "application/zip":        "zip",
 }
 
 

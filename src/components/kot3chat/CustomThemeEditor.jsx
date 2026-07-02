@@ -32,8 +32,12 @@ import React from 'react';
 import {
   CUSTOM_ACCENT_KEY,
   DEFAULT_CUSTOM_ACCENT,
+  KOT3CHAT_PARAMS,
+  KOT3CHAT_TIER_KEY,
+  kot3chatLabelFor,
   hexToRgb,
-} from './constants';
+  writeAppearanceChoice,
+} from './params';
 
 // 8 default accent presets. Chosen for high contrast on both dark and light
 // chrome backgrounds. Order = most-used to least-used; reset puts the user
@@ -185,6 +189,113 @@ export function CustomThemeEditor({ currentAccent, lang, onPickAccent }) {
         >
           <i className="fas fa-rotate-left" aria-hidden="true" /> {t('Reset', 'Retabli')}
         </button>
+      </div>
+
+      {/* ── Premium-Tier preview footer ─────────────────────────────
+          Iterates KOT3CHAT_PARAMS.premiumTiers + renders a horizontal
+          mini-card per tier showing the tier's crown + label + accent
+          stripe. Clicking a tier persists it via ``writeAppearanceChoice``
+          so future work (a server-side tier upgrade, the
+          <PremiumBadge/> component reading the active tier from storage,
+          a tier-locked wallpaper affordance) can read the choice from
+          one place. Free-tier click is allowed because there's no
+          server-side check — the registry accent is rendered, the chip
+          doesn't actually unlock perks.                                       */}
+      <hr className="kot3-theme-section-divider" aria-hidden="true" />
+      <div
+        className="kot3-custom-theme-tier-preview"
+        role="group"
+        aria-label={t('Premium tier preview', 'Apèsi nivo premium')}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 7,
+            padding: '6px 10px',
+            fontSize: 10.5,
+            fontWeight: 700,
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <i className="fas fa-crown" aria-hidden="true" style={{ color: 'var(--primary-color)', fontSize: 11 }} />
+          {t('Premiums', 'Premyòm')}
+        </div>
+        <div className="kot3-custom-theme-tier-row">
+          {KOT3CHAT_PARAMS.premiumTiers.map((tier) => {
+            // The "current accent" stripe warms up the tier's accent on
+            // the user's chosen background — so a user with a
+            // pink-accent + a lavender Studio tier shows a lavender-core
+            // tint inside the pink halo.  Future PRs can pull the
+            // actual mixed color from a CSS color-mix helper.
+            const haloColor = currentAccent || DEFAULT_CUSTOM_ACCENT;
+            return (
+              <button
+                type="button"
+                key={tier.id}
+                className={`kot3-custom-theme-tier-chip${tier.id === 'free' ? ' is-default' : ''}`}
+                aria-label={`${tier.labelEn} tier`}
+                title={tier.perks.length
+                  ? `${tier.labelEn} · ${tier.perks.join(', ')}`
+                  : tier.labelEn
+                }
+                onClick={() => writeAppearanceChoice(KOT3CHAT_TIER_KEY, tier.id, 'data-kot3-tier')}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 4,
+                  padding: '8px 6px 6px',
+                  background: 'transparent',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  color: 'var(--text-primary)',
+                  flex: 1,
+                  minWidth: 0,
+                  position: 'relative',
+                  overflow: 'hidden',
+                  // Soft halo: a faint accent glow behind the icon so the
+                  // user can tell their accent affects the tier highlight.
+                  boxShadow: tier.id !== 'free'
+                    ? `inset 0 0 0 1px ${haloColor}33, 0 0 12px ${haloColor}22`
+                    : 'none',
+                }}
+              >
+                <span
+                  className={`${tier.family} ${tier.icon} kot3-custom-theme-tier-crown`}
+                  aria-hidden="true"
+                  style={{
+                    fontSize: 16,
+                    color: tier.id === 'free' ? 'var(--text-secondary)' : tier.accent,
+                    textShadow: tier.id === 'free'
+                      ? 'none'
+                      : `0 1px 4px ${haloColor}aa`,
+                  }}
+                />
+                <span
+                  className="kot3-custom-theme-tier-label"
+                  style={{
+                    fontSize: 9.5,
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    maxWidth: '100%',
+                    color: tier.id === 'free'
+                      ? 'var(--text-secondary)'
+                      : 'var(--text-primary)',
+                  }}
+                >
+                  {kot3chatLabelFor(tier, lang)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

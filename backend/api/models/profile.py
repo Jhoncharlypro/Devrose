@@ -126,6 +126,26 @@ class Profile(models.Model):
     # 'everyone' | 'friends' | 'nobody' — who can see last_seen
     last_seen_visibility = models.CharField(max_length=10, default='everyone')
 
+    # ---- Kot3 Profile privacy additions (0021) ----
+    # Two per-field toggles that complement the coarse-grained visibility
+    # enums above. ``show_contact_info`` controls whether email + phone
+    # appear on the About tab of the user's Kot3 chat profile (the
+    # ``ProfileViewSet.retrieve`` redaction enforces this even when the
+    # coarse-grained profile_visibility is ``public``). ``allow_stranger_dms``
+    # gates whether non-mutual users can DM the user (the chat consumer
+    # honors it via a future ``get_block_or_mute_user_ids`` extension —
+    # today it's exposed read/write so the UI toggle persists).
+    #
+    # Default for ``show_contact_info`` is ``True`` to preserve the
+    # pre-0021 behavior (email was always shown unless the user set
+    # profile_visibility to ``private``). Users opt OUT of contact
+    # visibility by flipping the Kot3 Profile single-page privacy
+    # console toggle to ``False``. The previous draft used ``False``
+    # but that silently hid the email for every existing user on
+    # rollout — not a backward-compatible default.
+    show_contact_info = models.BooleanField(default=True)
+    allow_stranger_dms = models.BooleanField(default=True)
+
     # ---- PROFILE module additions (0012) ----
     # Wide banner above the avatar. Data URL (base64) — same encoding as
     # ``avatar`` so FileReader.readAsDataURL + service.patch() works
@@ -193,3 +213,44 @@ class MutedUser(models.Model):
 
     def __str__(self):
         return f"Mute {self.actor_id} → {self.muted_id}"
+
+
+class ProfileActivityLog(models.Model):
+    """
+    Append-only audit log of profile-related events. Powers the
+    Activity Timeline UI in ``src/components/kot3/Kot3Profile.jsx``.
+
+    ``user`` is the user whose profile the event applies to (NOT
+    necessarily the actor — a ``profile_view`` event is about the
+    target user's profile, not the viewer's).
+
+    ``action`` is a short stable string the FE maps to an icon + color.
+    Known actions:
+      - ``visibility_change``  : profile_visibility / last_seen_visibility toggled
+      - ``contact_toggle``     : show_contact_info flipped
+      - ``dms_toggle``         : allow_stranger_dms flipped
+      - ``profile_view``       : someone fetched the public profile
+      - ``profile_update``     : any other non-privacy field changed
+
+    ``details`` is a free-form JSONField so we don't have to migrate
+    the schema every time we add a new event type. The FE only reads
+    a few well-known keys (old → new, viewer_username, etc.).
+    """
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='profile_activity',
+    )
+    action = models.CharField(max_length=40)
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            # Hot read path: the user's last N events.
+            models.Index(fields=['user', '-created_at'], name='profile_act_user_idx'),
+            # Filtering by action type for analytics queries later.
+            models.Index(fields=['action'], name='profile_act_action_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} {self.action} @ {self.created_at:%Y-%m-%d %H:%M}'

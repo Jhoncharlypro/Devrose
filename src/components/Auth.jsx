@@ -65,7 +65,7 @@ const Auth = ({ isOpen, onClose, onLoginSuccess, lang, showToast }) => {
     reset_submit: t.reset_submit || 'Save new password',
     forgot_success: t.forgot_success || 'If the email is registered, a reset link has been issued.',
     reset_success: t.reset_success || 'Password updated. Please log in.',
-    placeholder_username: t.wizard_full_name || 'Username',
+    placeholder_username: lang === 'ht' ? 'Non itilizatè' : 'Username',
     placeholder_email: t.wizard_email || 'Email',
     placeholder_password: t.password_placeholder || 'Password',
     forgot_link: t.forgot_password_link || 'Forgot password?',

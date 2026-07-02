@@ -8,7 +8,7 @@ Le nom du dépôt GitHub et du projet est **Devrose** (nom commercial complet : 
 
 ## ✨ Fonctionnalités principales
 
-- 🎓 **Catalogue de cours** avec recherche, favoris, et inscription multi-étapes (wizard)
+- 🎓 **Catalogue de cours** avec recherche, exploration multi-contenu, et inscription via l'espace d'administration (Course Manager)
 - 🟢 **Classes en direct** (Google Meet) avec planning, mentoring 1-on-1, coaching carrière
 - 💻 **Simulateur Linux intégré** (DevRose Pro Linux Shell — Debian 12 Bookworm) pour exécuter Python / HTML / Bash dans le navigateur
 - 💬 **Chat communautaire temps réel** (Kot3 Chat — WebSockets via Django Channels) avec stories / status style Messenger / WhatsApp
@@ -169,7 +169,6 @@ Pour le développement, la couche **InMemoryChannelLayer** est utilisée par dé
 | POST | `/api/auth/login/` | Connexion JWT |
 | POST | `/api/auth/signup/` | Inscription |
 | GET | `/api/courses/` | Liste des cours |
-| POST | `/api/favorites/` | Ajouter aux favoris |
 | GET | `/api/sessions/me/` | Session utilisateur en cours |
 | POST | `/api/progress/` | Marquer la progression |
 | GET | `/api/liverooms/` | Liste des salles live |

@@ -1,0 +1,1049 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   ESPAS KONFIDANSYALITE · PRIVACY SPACE
+   Shares --atelier-neon / --atelier-cyan / --atelier-bg / mono stack
+   with src/styles/atelier.css. This file only adds a privacy-specific
+   layer on top so the two z-5000 overlays feel like siblings in the
+   same family without becoming identical twins.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Privacy-specific palette. Slightly cooler than the Atelier's hot
+     pink dominance: a violet lean keeps the "control room" feel apart
+     from the "lab" feel of the Atelier, while still drawing from the
+     same neon palette. */
+  --privacy-bg:        #0a0c14;
+  --privacy-bg-2:      #13161f;
+  --privacy-accent:    #6c5ce7;      /* violet — primary privacy accent */
+  --privacy-accent-2:  #00e7ff;      /* cyan   — secondary, ties to Atelier */
+  --privacy-text:      #e6e6f0;
+  --privacy-text-dim:  rgba(230, 230, 240, 0.6);
+  --privacy-text-mist: rgba(230, 230, 240, 0.4);
+  --privacy-border:    rgba(108, 92, 231, 0.25);
+  --privacy-border-2:  rgba(255, 255, 255, 0.05);
+  --privacy-danger:    #ff5c70;
+
+  --privacy-mono:      var(--atelier-mono, 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace);
+  --privacy-radius:    14px;
+  --privacy-card-radius: 12px;
+}
+
+body.dark-mode {
+  --privacy-bg:       #06080d;
+  --privacy-bg-2:     #0e1117;
+  --privacy-border:   rgba(108, 92, 231, 0.32);
+}
+
+/* Body scroll-lock while Privacy Space is mounted. ``overscroll-behavior``
+   prevents the iOS rubber-band scroll from leaking into the underlying
+   page when the dialog scrolls to its top/bottom edges. */
+body.privacy-open {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+/* The dialog node has ``tabIndex={-1}`` + on-open focus (see
+   PrivacySpace.jsx). Suppress the default focus ring so it doesn't
+   pollute the screen during a vanilla focus steal, but keep a
+   keyboard-only ring for users navigating with the keyboard. */
+.privacy-shell:focus { outline: none; }
+.privacy-shell:focus-visible {
+  outline: 2px solid rgba(108, 92, 231, 0.55);
+  outline-offset: -4px;
+}
+
+.privacy-shell {
+  position: fixed;
+  inset: 0;
+  /* ``100dvh`` covers the dynamic viewport on iOS Safari /
+     Android Chrome, so the flex-column adapts to the collapsing
+     address bar instead of leaking past it. Falls back to ``100vh``
+     on browsers without ``dvh`` support. */
+  /* ``min-height: 100vh`` is the belt-and-suspenders fallback for
+     browsers that ignore ``dvh`` entirely (Safari < 15.4, Firefox
+     < 113, Samsung Internet < 22). Without a fallback the shell
+     collapses below the visible viewport when the address bar
+     finishes collapsing, letting the footer's bottom drift
+     off-screen mid-scroll right when the user is doing the gesture
+     that needs anchoring most. We deliberately use ``100vh`` here
+     (slightly over-tall is fine for stability) rather than
+     ``100dvh`` so legacy browsers still get a usable floor. */
+  min-height: 100vh;
+  height: 100dvh;
+  z-index: 5000;
+  /* 100% OPAQUE — longhand ``background-color`` instead of
+     ``background: var()`` shorthand. Safari / legacy mobile
+     parsers can fail to resolve ``var()`` inside the shorthand
+     and fall back to ``transparent``, leaving only the
+     ``background-image`` whose gradient stops are also
+     transparent — so the page beneath leaks THROUGH the modal.
+     Belt-and-suspenders: a redundant opaque ``.privacy-veil``
+     layer at z-index -1 sits below all other chrome. The
+     ``#0a0c14`` fallback keeps the value defined even on
+     browsers that drop CSS custom-property resolution. */
+  background-color: var(--privacy-bg, #0a0c14);
+  background-image: none;
+  color: var(--privacy-text);
+  font-family: 'Poppins', system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  animation: privacy-shell-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  overflow: hidden;
+}
+
+@keyframes privacy-shell-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(4px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
+}
+
+.privacy-noise {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' /></filter><rect width='200' height='200' filter='url(%23n)' /></svg>");
+  /* ``mix-blend-mode: overlay`` removed (was iOS Safari
+     stacking-context punch-through source — the blend mode
+     forced the noise to composite against the document body
+     instead of the shell, giving the erroneous "the whole
+     modal is transparent" perception). Pure 0.04 opacity
+     renders the same grain safely. */
+}
+
+/* ── VEIL (safety belt) ────────────────────────────────────────
+   An absolutely-positioned OPAQUE layer at z-index -1 inside
+   the shell. If any element above ever has a stacking-context
+   bug or a Safari backdrop-filter punch-through, the veil
+   guarantees the user never sees content BELOW the modal.
+   Sits BELOW the noise and BELOW the chrome; never blocks
+   interaction because pointer-events: none.
+   ────────────────────────────────────────────────────────── */
+.privacy-veil {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  /* ⚠️ LOAD-BEARING — DO NOT drop this opaque bg.
+     The corner-glow below is decorative translucent alpha
+     painted ON TOP of THIS solid base. If a future edit
+     removes this line thinking "the shadow does the work"
+     the bleed-through bug returns. The JSON-level safety
+     belt is the corresponding <div className="privacy-veil">
+     element in PrivacySpace.jsx AS WELL — both layers are
+     required. See the bleed-fix commit history for the
+     full rationale. */
+  background-color: var(--privacy-bg, #0a0c14);
+  /* Inset box-shadow corner glow — recreates the visual
+     flavour of the original radial-gradient backdrop
+     WITHOUT any transparent gradient stops that could
+     compose against the document body. Two opposite
+     corners (violet top-left + cyan bottom-right), summed
+     in a single shadow stack. The veil's own bg stays
+     100% opaque so this is safe. */
+  box-shadow:
+    inset 220px 220px 220px -130px rgba(108, 92, 231, 0.55),
+    inset -220px -220px 220px -130px rgba(0, 231, 255, 0.45);
+  pointer-events: none;
+}
+
+/* ── TOPBAR ─────────────────────────────────────────────────── */
+.privacy-topbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--privacy-border);
+  /* OPAQUE solid topbar — was ``background: linear-gradient()``
+     shorthand which defaults ``background-color`` to
+     ``transparent`` (even if the gradient is the only bg, the
+     trailing transparent stop could expose the body in some
+     Safari versions). Slightly lighter than the shell so the
+     divider reads as a discrete chrome band. */
+  background-color: var(--privacy-bg-2, #13161f);
+  position: relative; z-index: 2;
+  flex-shrink: 0;
+}
+
+.privacy-topbar-title {
+  display: flex; align-items: center; gap: 12px;
+  flex: 1; min-width: 0;
+}
+
+.privacy-pulse-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--privacy-accent);
+  box-shadow: 0 0 10px var(--privacy-accent), 0 0 22px rgba(108, 92, 231, 0.25);
+  animation: privacy-pulse-dot-anim 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes privacy-pulse-dot-anim {
+  0%, 100% { opacity: 0.45; transform: scale(0.86); }
+  50%      { opacity: 1;    transform: scale(1.18); }
+}
+
+.privacy-topbar h2 {
+  margin: 0; font-size: 1.05rem; font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--privacy-text);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.privacy-subtitle {
+  font-size: 0.78rem;
+  color: var(--privacy-text-dim);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Autosave badge — top-right pill, animates with save state. */
+.privacy-autosave {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--privacy-border-2);
+  border-radius: 999px;
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--privacy-text-mist);
+  flex-shrink: 0;
+  transition: all 0.25s ease;
+}
+.privacy-autosave[data-state="saving"] {
+  color: var(--privacy-accent-2);
+  border-color: rgba(0, 231, 255, 0.3);
+  box-shadow: 0 0 0 2px rgba(0, 231, 255, 0.1);
+}
+.privacy-autosave[data-state="saved"]  {
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.3);
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.1);
+  animation: privacy-saved-pop 0.5s ease;
+}
+@keyframes privacy-saved-pop {
+  0%   { transform: scale(0.95); }
+  50%  { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+/* Preview‑as trigger — top-right pill, opens Kot3Profile overlay.
+   Made to feel like a sibling of the autosave pill so they balance. */
+.privacy-tab-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.18), rgba(0, 231, 255, 0.10));
+  border: 1px solid rgba(108, 92, 231, 0.4);
+  border-radius: 999px;
+  color: var(--privacy-text);
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.privacy-tab-trigger:hover {
+  border-color: var(--privacy-accent);
+  box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.18), 0 4px 14px rgba(108, 92, 231, 0.18);
+  transform: translateY(-1px);
+}
+.privacy-tab-trigger:active { transform: translateY(0) scale(0.98); }
+.privacy-tab-trigger.is-disabled,
+.privacy-tab-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Close button. */
+.privacy-close {
+  width: 38px; height: 38px;
+  border: 1px solid var(--privacy-border);
+  background: transparent;
+  color: var(--privacy-text);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.privacy-close:hover {
+  background: rgba(108, 92, 231, 0.12);
+  border-color: var(--privacy-accent);
+  color: var(--privacy-accent);
+  transform: rotate(90deg);
+}
+
+/* ── TABS ───────────────────────────────────────────────────── */
+.privacy-tabs {
+  display: flex; gap: 6px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--privacy-border);
+  overflow-x: auto;
+  position: relative; z-index: 2;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.privacy-tabs::-webkit-scrollbar { display: none; }
+
+.privacy-tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 18px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--privacy-text-dim);
+  font-family: inherit;
+  font-size: 0.82rem; font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  position: relative;
+}
+.privacy-tab i { font-size: 0.85rem; }
+.privacy-tab:hover { color: var(--privacy-text); }
+.privacy-tab.is-active {
+  color: var(--privacy-accent);
+  border-bottom-color: var(--privacy-accent);
+  text-shadow: 0 0 8px rgba(108, 92, 231, 0.35);
+}
+.privacy-tab-status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: rgba(108, 92, 231, 0.3);
+  margin-left: 4px;
+}
+.privacy-tab.is-active .privacy-tab-status-dot {
+  background: var(--privacy-accent);
+  box-shadow: 0 0 6px var(--privacy-accent);
+}
+
+/* ── MAIN ───────────────────────────────────────────────────── */
+.privacy-main {
+  flex: 1;
+  overflow-y: auto;
+  /* Padding-bottom bumped 80\u2192120px because the footer is
+     now position:fixed (out of flex flow). Without this bump,
+     main extends to the viewport's absolute bottom and the
+     last form card would scroll BEHIND the fixed footer.
+     120px = footer (~50px) + safe-area-inset-bottom (~34px
+     max on iPhone X-class) + ~36px visual breathing room so
+     the last card sits comfortably above the footer. */
+  padding: 24px 24px 160px 24px;
+  /* Stable scrollbar gutter: reserves the 6–15px space the scrollbar
+     needs FROM the moment the dialog opens, so the canvas doesn't
+     visibly jump by a few pixels when content overflows / un-overflows.
+     Critical for the "footer doesn't feel glued" perception: a
+     horizontal scrollbar hop on overflow is one of the most common
+     causes of "the page is wobbling under my finger". */
+  scrollbar-gutter: stable;
+  position: relative; z-index: 1;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(108, 92, 231, 0.4) transparent;
+}
+.privacy-main::-webkit-scrollbar { width: 8px; }
+.privacy-main::-webkit-scrollbar-thumb {
+  background: rgba(108, 92, 231, 0.4); border-radius: 4px;
+}
+
+/* ── PANE (each tab content wrapper) ────────────────────────── */
+.privacy-pane {
+  max-width: 720px; margin: 0 auto;
+  display: flex; flex-direction: column;
+  gap: 14px;
+  animation: privacy-pane-in 0.4s ease both;
+}
+@keyframes privacy-pane-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── HERO (section opener — title + status chip) ────────────── */
+.privacy-hero {
+  display: flex; align-items: flex-start; gap: 16px;
+  padding: 16px 18px;
+  margin-bottom: 6px;
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.08), rgba(0, 231, 255, 0.04));
+  border: 1px solid var(--privacy-border);
+  border-radius: var(--privacy-radius);
+  position: relative;
+  overflow: hidden;
+}
+.privacy-hero::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 100% 0%, rgba(108, 92, 231, 0.18), transparent 60%);
+  pointer-events: none;
+}
+.privacy-hero-text { flex: 1; min-width: 0; position: relative; }
+.privacy-hero-text h3 {
+  margin: 0 0 4px;
+  font-size: 1.05rem; font-weight: 800;
+  color: var(--privacy-text);
+  letter-spacing: 0.02em;
+}
+.privacy-hero-text p {
+  margin: 0; font-size: 0.82rem;
+  color: var(--privacy-text-dim);
+  line-height: 1.5;
+}
+.privacy-hero-chips {
+  display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+  position: relative;
+}
+.privacy-hero-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px;
+  background: rgba(0, 231, 255, 0.10);
+  border: 1px solid rgba(0, 231, 255, 0.3);
+  border-radius: 999px;
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--privacy-accent-2);
+}
+
+/* ── CARDS (control containers) ─────────────────────────────── */
+.privacy-card {
+  background: var(--privacy-bg-2);
+  border: 1px solid var(--privacy-border-2);
+  border-radius: var(--privacy-card-radius);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.privacy-card:hover {
+  border-color: rgba(108, 92, 231, 0.25);
+  background: linear-gradient(180deg, var(--privacy-bg-2), rgba(108, 92, 231, 0.03));
+}
+.privacy-card-danger {
+  border-color: rgba(255, 92, 112, 0.28);
+  background: linear-gradient(180deg, rgba(255, 92, 112, 0.04), transparent);
+}
+.privacy-card-danger:hover {
+  border-color: rgba(255, 92, 112, 0.5);
+}
+
+.privacy-card-body {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px;
+}
+.privacy-card-label {
+  display: flex; align-items: flex-start; gap: 10px;
+  flex: 1; min-width: 0;
+}
+.privacy-card-label > i {
+  flex: 0 0 28px; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(108, 92, 231, 0.12);
+  color: var(--privacy-accent);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+.privacy-card-label strong {
+  display: block; font-size: 0.85rem; font-weight: 700;
+  color: var(--privacy-text);
+}
+.privacy-card-label span {
+  display: block; font-size: 0.72rem;
+  color: var(--privacy-text-dim);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+.privacy-card-control { flex-shrink: 0; }
+
+.privacy-card-clickable { cursor: pointer; }
+.privacy-card-collapsible .privacy-card-clickable {
+  padding: 14px 16px;
+}
+
+/* ── SELECTS ────────────────────────────────────────────────── */
+.privacy-select {
+  padding: 8px 12px;
+  background: var(--privacy-bg);
+  border: 1px solid var(--privacy-border);
+  color: var(--privacy-text);
+  border-radius: 6px;
+  font: inherit; font-size: 0.8rem; font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  min-width: 140px;
+}
+.privacy-select:focus {
+  border-color: var(--privacy-accent);
+  box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.18);
+}
+.privacy-select-full { width: 100%; min-width: 0; }
+
+/* ── SWITCH (toggle) ────────────────────────────────────────── */
+.privacy-switch {
+  position: relative; display: inline-block;
+  width: 44px; height: 24px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.privacy-switch input { opacity: 0; width: 0; height: 0; }
+.privacy-switch-slider {
+  position: absolute; inset: 0;
+  background: var(--privacy-border-2);
+  border: 1px solid var(--privacy-border);
+  border-radius: 24px;
+  transition: 0.2s ease;
+  cursor: pointer;
+}
+.privacy-switch-slider::before {
+  position: absolute; content: '';
+  height: 16px; width: 16px;
+  left: 3px; bottom: 3px;
+  background: var(--privacy-text);
+  border-radius: 50%;
+  transition: 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.privacy-switch input:checked + .privacy-switch-slider {
+  background: linear-gradient(135deg, var(--privacy-accent), var(--privacy-accent-2));
+  border-color: transparent;
+}
+.privacy-switch input:checked + .privacy-switch-slider::before {
+  transform: translateX(20px);
+}
+
+/* ── INPUTS / TEXTAREA ─────────────────────────────────────── */
+.privacy-input,
+.privacy-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--privacy-bg);
+  border: 1px solid var(--privacy-border);
+  border-radius: 6px;
+  color: var(--privacy-text);
+  font: inherit;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.privacy-input:focus,
+.privacy-textarea:focus {
+  border-color: var(--privacy-accent);
+  box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.18);
+}
+.privacy-textarea { resize: vertical; }
+.privacy-mono { font-family: var(--privacy-mono); font-size: 0.78rem; }
+
+.privacy-bio-counter {
+  margin-top: 4px;
+  font-family: var(--privacy-mono);
+  font-size: 0.72rem;
+  color: var(--privacy-text-mist);
+  text-align: right;
+}
+
+/* ── BUTTONS ────────────────────────────────────────────────── */
+.privacy-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 14px;
+  background: rgba(108, 92, 231, 0.12);
+  border: 1px solid var(--privacy-border);
+  border-radius: 6px;
+  color: var(--privacy-text);
+  font: inherit;
+  font-size: 0.78rem; font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.privacy-btn:hover {
+  background: rgba(108, 92, 231, 0.22);
+  border-color: var(--privacy-accent);
+  color: var(--privacy-accent);
+  transform: translateY(-1px);
+}
+.privacy-btn:active { transform: scale(0.98); }
+.privacy-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+.privacy-btn-primary {
+  background: linear-gradient(135deg, var(--privacy-accent), var(--privacy-accent-2));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(108, 92, 231, 0.25);
+}
+.privacy-btn-primary:hover {
+  color: #fff;
+  box-shadow: 0 6px 20px rgba(108, 92, 231, 0.4);
+}
+.privacy-btn-ghost {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--privacy-border-2);
+  color: var(--privacy-text-dim);
+}
+.privacy-btn-ghost:hover {
+  background: rgba(108, 92, 231, 0.08);
+  color: var(--privacy-text);
+  border-color: var(--privacy-border);
+}
+.privacy-btn-danger {
+  background: rgba(255, 92, 112, 0.12);
+  border-color: rgba(255, 92, 112, 0.4);
+  color: var(--privacy-danger);
+}
+.privacy-btn-danger:hover {
+  background: rgba(255, 92, 112, 0.22);
+  border-color: var(--privacy-danger);
+}
+
+/* ── UPLOADERS ─────────────────────────────────────────────── */
+.privacy-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 14px;
+}
+.privacy-uploader {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px;
+}
+.privacy-uploader-preview {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed var(--privacy-border);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--privacy-accent);
+  font-size: 2.4rem;
+  overflow: hidden;
+}
+.privacy-uploader-preview img {
+  width: 100%; height: 100%; object-fit: cover;
+}
+.privacy-uploader-cover .privacy-uploader-preview {
+  aspect-ratio: 3 / 1;
+}
+.privacy-upload-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 14px;
+  border: 1px dashed var(--privacy-border);
+  border-radius: 6px;
+  font-size: 0.78rem; font-weight: 700;
+  color: var(--privacy-accent);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.privacy-upload-btn:hover {
+  background: rgba(108, 92, 231, 0.08);
+  border-style: solid;
+}
+.privacy-upload-btn i { font-size: 0.78rem; }
+
+/* ── INTERESTS CHIPS ───────────────────────────────────────── */
+.privacy-interests-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 14px 16px;
+}
+.privacy-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 16px 14px 16px;
+}
+.privacy-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 11px;
+  background: rgba(108, 92, 231, 0.12);
+  border: 1px solid var(--privacy-border);
+  border-radius: 999px;
+  font-size: 0.78rem; font-weight: 600;
+  color: var(--privacy-accent);
+  font-family: var(--privacy-mono);
+}
+.privacy-chip button {
+  background: transparent; border: 0;
+  color: var(--privacy-accent);
+  font-size: 0.65rem;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.privacy-chip button:hover {
+  background: rgba(255, 92, 112, 0.18);
+  color: var(--privacy-danger);
+}
+
+/* ── SOCIAL GRID ───────────────────────────────────────────── */
+.privacy-social-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 0 16px 14px 16px;
+}
+.privacy-social-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 10px; align-items: center;
+}
+.privacy-social-platform {
+  font-family: var(--privacy-mono);
+  font-size: 0.78rem;
+  color: var(--privacy-text-dim);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+/* ── USERNAME DISPLAY (read-only) ───────────────────────────── */
+.privacy-username-display {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px 14px 16px;
+}
+.privacy-username-handle {
+  font-family: var(--privacy-mono);
+  font-size: 1.05rem; font-weight: 700;
+  color: var(--privacy-text);
+}
+.privacy-username-hint {
+  font-size: 0.72rem;
+  color: var(--privacy-text-mist);
+}
+
+/* ── NOTIF GRID ────────────────────────────────────────────── */
+.privacy-notif-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 0 16px 14px 16px;
+}
+.privacy-notif-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--privacy-border-2);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.privacy-notif-row:hover {
+  border-color: rgba(108, 92, 231, 0.25);
+  background: rgba(108, 92, 231, 0.05);
+}
+.privacy-notif-row i {
+  color: var(--privacy-accent);
+  width: 16px;
+}
+.privacy-notif-row span { flex: 1; font-size: 0.82rem; }
+
+/* ── EMPTY + LIST ──────────────────────────────────────────── */
+.privacy-empty {
+  margin: 0;
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 0.84rem;
+  color: var(--privacy-text-mist);
+  font-style: italic;
+}
+.privacy-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  padding: 0 16px 14px 16px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.privacy-list-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+/* ── BADGES ────────────────────────────────────────────────── */
+.privacy-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--privacy-border-2);
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--privacy-text-dim);
+}
+.privacy-badge.is-good {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+.privacy-badge.is-warn {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+/* ── VERIFY ────────────────────────────────────────────────── */
+.privacy-verify-state {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px 8px 16px;
+}
+.privacy-verify-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 0 16px 14px 16px;
+}
+
+/* ── PWD FORM ──────────────────────────────────────────────── */
+.privacy-pwd-form {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 8px 16px 14px 16px;
+  animation: privacy-pane-in 0.3s ease;
+}
+
+/* ── ACTIVITY TIMELINE (mirrors Kot3Profile styling) ────────── */
+.privacy-timeline {
+  list-style: none;
+  padding: 6px 0;
+  margin: 0;
+  position: relative;
+}
+.privacy-timeline::before {
+  content: '';
+  position: absolute;
+  left: 12px; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--privacy-border-2);
+}
+.privacy-timeline-item {
+  position: relative;
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 4px 10px 0;
+}
+.privacy-timeline-dot {
+  flex: 0 0 28px;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-size: 0.7rem;
+  margin-left: -2px;
+  z-index: 1;
+  position: relative;
+}
+.privacy-timeline-body { flex: 1; min-width: 0; }
+.privacy-timeline-label {
+  font-size: 0.84rem; font-weight: 600;
+  color: var(--privacy-text);
+  line-height: 1.35;
+}
+.privacy-timeline-time {
+  font-size: 0.7rem;
+  color: var(--privacy-text-mist);
+  font-family: var(--privacy-mono);
+  margin-top: 2px;
+}
+
+/* ── STATUS PILL (variant of privacy-badge for the visibility chip) ── */
+.privacy-status-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--pill-color, var(--privacy-border));
+  border-radius: 999px;
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--pill-color, var(--privacy-text-dim));
+}
+.privacy-status-dot { font-size: 0.78rem; }
+
+/* ── IN-PANE NAV (prev / progress chip / next) ─────────────────────────────
+   Sits INSIDE each pane at the bottom of its content (above the global
+   frosted-glass footer). Lets the user move between tabs without
+   scrolling all the way back to the top tab nav — addresses the
+   "lsolated sub-space" request where each pane feels independent.
+
+   Visual language is intentionally sibling to the atelier-launcher
+   card pattern: rounded-pill, frosted-glass backdrop, mono labels,
+   violet→cyan gradient on the Next button.
+
+   ``--pane-progress`` is a JS-set custom property (0–100 %) on the
+   progress-bar element. We animate the inner rule via CSS so JS doesn't
+   have to touch the DOM on every progress tick.
+   ──────────────────────────────────────────────────────────────────────── */
+.privacy-pane-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  margin: 28px auto 4px auto;
+  padding: 10px 12px;
+  max-width: 720px;
+  /* OPAQUE solid (was rgba 55% + backdrop-filter 10px).
+     ``backdrop-filter`` literally REQUIRES transparency to
+     do its job, so any "frosted-glass" element has visible
+     content beneath it. Zero-bleed mandate. */
+  /* Bumped from --privacy-bg-2 (#13161f, only 9-luma delta
+     against the shell's #0a0c14 — pill risked blending
+     into the bg) to a richer violet-tinted elevated dark
+     tier that reads as a discrete chip. */
+  background-color: #1a1d2e;
+  border: 1px solid var(--privacy-border);
+  border-radius: 999px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+}
+
+.privacy-pane-nav-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 14px;
+  background: rgba(108, 92, 231, 0.10);
+  border: 1px solid var(--privacy-border);
+  border-radius: 999px;
+  color: var(--privacy-text);
+  font-family: var(--privacy-mono);
+  font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.privacy-pane-nav-btn:hover:not(:disabled) {
+  background: rgba(108, 92, 231, 0.22);
+  border-color: var(--privacy-accent);
+  color: var(--privacy-accent);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.15);
+}
+.privacy-pane-nav-btn:active { transform: scale(0.97); }
+.privacy-pane-nav-btn:disabled {
+  opacity: 0.35; cursor: not-allowed; pointer-events: none;
+}
+.privacy-pane-nav-btn-next {
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.20), rgba(0, 231, 255, 0.10));
+  border-color: rgba(108, 92, 231, 0.4);
+}
+.privacy-pane-nav-btn:focus-visible {
+  outline: 2px solid var(--privacy-accent);
+  outline-offset: 2px;
+}
+
+.privacy-pane-nav-progress {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--privacy-mono);
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--privacy-text-dim);
+  flex: 1; justify-content: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+.privacy-pane-nav-progress-bar {
+  display: inline-block;
+  width: 60px; height: 4px;
+  background: rgba(108, 92, 231, 0.18);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+.privacy-pane-nav-progress-bar::after {
+  content: '';
+  position: absolute; left: 0; top: 0; height: 100%;
+  width: var(--pane-progress, 0%);
+  background: linear-gradient(90deg, var(--privacy-accent), var(--privacy-accent-2));
+  border-radius: 999px;
+  transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (max-width: 720px) {
+  .privacy-pane-nav { padding: 8px 10px; gap: 8px; margin-top: 22px; }
+  .privacy-pane-nav-btn { padding: 6px 10px; font-size: 0.65rem; }
+  .privacy-pane-nav-btn i { display: none; }   /* icon-only on tight screens */
+  .privacy-pane-nav-progress-bar { width: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .privacy-pane-nav-btn,
+  .privacy-pane-nav-progress-bar::after {
+    transition: none !important;
+  }
+}
+
+/* ── FOOTER ─────────────────────────────────────────────────── */
+.privacy-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  /* ``padding-bottom`` = base + iOS safe-area inset so the footer
+     text sits ABOVE the home indicator on iPhone-X-class devices.
+     ``align-self: flex-end`` ensures the footer sticks to the BOTTOM
+     of the shell even if flex length computation drifts on Chromium
+     or older Samsung Internet. */
+  padding: 20px 24px calc(16px + env(safe-area-inset-bottom, 0px)) 24px;
+  border-top: 1px solid var(--privacy-border);
+  /* Solid translucent black + backdrop-filter = proper frosted-glass
+     barrier that fully clips the scrolling main panel below it, so
+     content never visually bleeds under the footer. */
+  /* OPAQUE SOLID (was rgba 85% + backdrop-filter 12px).
+     The user complaint specifically called out the "absolute
+     bottom (0 bottom)" of the modal which is exactly where
+     this footer sat. ``backdrop-filter`` literally REQUIRES
+     see-through to do its job. The 2px upward ``box-shadow``
+     above is the same hard-barrier visual feel without any
+     transparency. */
+  background-color: var(--privacy-bg, #0a0c14);
+  /* Reduced from 24px → 12px blur with a deeper alpha. The original
+     24px blur forced a wide GPU compositor repaint during every
+     scroll tick, which is what caused the "bottom is wobbling"
+     perception on slower mobile GPUs. 12px at 50% opacity keeps the
+     hard-barrier feel without the per-frame redraw cost. */
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.5);
+  /* Sticky + bottom:0 is the redundant anchor: even if the shell
+     resizes mid-interaction (iOS keyboard opening, Android bottom
+     UI popping, Firefox briefly forgetting dvh), the footer is
+     glued to the shell's content-box bottom by the layout engine
+     instead of by flex math.
+     NOTE: deliberately NOT using ``will-change: transform`` here.
+     A permanent ``will-change`` promotes the footer to its own GPU
+     compositor layer that is NEVER released, leaving a constant
+     memory footprint as long as the component stays mounted. The
+     12px shadow blur reduction already addresses the wobbly-rendering
+     concern so the layer promotion is no longer needed. */
+  /* position: fixed; + bottom/left/right: 0 = VIEWPORT-anchored
+     unconditional anchoring — the user's explicit fix request:
+     "position:fixed; ak bottom:0px" — so the modal's bottom
+     edge never drifts regardless of dvh fallback, flex math,
+     or any ancestor with transform/filter that could cap
+     sticky. The footer is now OUT OF FLEX FLOW (align-self is
+     irrelevant when fixed; we drop it), so .privacy-main’s
+     padding-bottom was bumped 80→120px above to clear it. */
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  flex-shrink: 0;
+}
+.privacy-footer-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--privacy-mono);
+  font-size: 0.78rem;
+  color: var(--privacy-text-mist);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.privacy-footer-tag i { color: var(--privacy-accent); }
+
+/* ── RESPONSIVE ─────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .privacy-topbar { padding: 12px 14px; gap: 10px; }
+  .privacy-topbar h2 { font-size: 0.95rem; }
+  .privacy-subtitle { display: none; }
+  .privacy-autosave { display: none; }
+  .privacy-tabs { padding: 0 12px; }
+  .privacy-tab { padding: 12px 12px; font-size: 0.72rem; }
+  .privacy-tab span { display: none; }
+  .privacy-main { padding: 16px; }
+  .privacy-grid-2 { grid-template-columns: 1fr; }
+  .privacy-social-row { grid-template-columns: 80px 1fr; }
+  .privacy-notif-grid { grid-template-columns: 1fr; }
+  .privacy-hero-chips { flex-direction: row; }
+  .privacy-tab-trigger { padding: 6px 10px; font-size: 0.65rem; }
+  .privacy-tab-trigger span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .privacy-shell,
+  .privacy-pane,
+  .privacy-pulse-dot,
+  .privacy-autosave { animation: none !important; }
+}

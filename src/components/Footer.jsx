@@ -5,12 +5,12 @@ const Footer = ({ lang, translations }) => {
 
   return (
     <footer style={{
-      marginTop: '50px',
-      padding: '30px',
+      marginTop: '60px',
+      padding: '40px 30px',
       textAlign: 'center',
       borderTop: '1px solid var(--pink-light)',
       color: '#888',
-      fontSize: '0.9rem'
+      fontSize: '0.95rem'
     }}>
       <div style={{ marginBottom: '15px', display: 'flex', justifyContent: 'center', gap: '20px', fontSize: '1.2rem' }}>
         <a href="#" style={{ color: 'var(--pink-primary)' }}><i className="fab fa-facebook"></i></a>

@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.utils import timezone
 from datetime import timedelta
-from ..models import ChatThread, Message, MessageReaction
+from django.db.models import Q
+from ..models import ChatThread, Message, MessageReaction, UserThreadSetting, CallLog
 from django.contrib.auth.models import User
 
 
@@ -52,19 +53,15 @@ class UserMiniSerializer(serializers.ModelSerializer):
             'type': story.type,
             'content': story.content,
             'background': story.background,
-            'created_at': story.created_at.isoformat()
+            'created_at': story.created_at.isoformat(),
         } for story in stories]
 
 
 def _build_reactions_context(messages, request_user):
     """
-    Aggregate ``MessageReaction`` rows for ``messages`` in two passes (one
-    for the chip aggregation, one for ``my_reactions``) so the caller can
-    pass the result as serializer context and avoid an N+1 inside
-    ``MessageSerializer.get_reactions`` / ``get_my_reactions``.
-
-    Returns ``{'reactions_by_message': {msg_id: [{emoji, user_id}, ...]},
-              'my_reactions_by_message': {msg_id: [emoji, ...]}}``.
+    Aggregate ``MessageReaction`` rows for ``messages`` in two passes so
+    the serializer reads from ``context`` instead of issuing N+1 SELECTs.
+    Returns ``{'reactions_by_message': {...}, 'my_reactions_by_message': {...}}``.
     """
     from ..models import MessageReaction
     msg_ids = [m.id for m in messages if m.id]
@@ -93,22 +90,25 @@ class MessageSerializer(serializers.ModelSerializer):
     sender = UserMiniSerializer(read_only=True)
     sender_id = serializers.IntegerField(source='sender.id', read_only=True)
     sender_username = serializers.CharField(source='sender.username', read_only=True)
-    # Use the underlying integer FK column directly. ``source='reply_to.id'``
-    # would trigger a follow-up SELECT for every message in the list
-    # (n+1); the integer column is already loaded as part of the row.
     reply_to_id = serializers.IntegerField(read_only=True, allow_null=True)
     reply_to_snippet = serializers.SerializerMethodField()
     reply_to_sender = serializers.SerializerMethodField()
-    # Step 3+4 (chat module additions): additive fields only. Existing
-    # callers see None / empty string on legacy rows → no rendering
-    # breakage, only a richer UI on new messages.
-    # Same n+1 reasoning as reply_to_id: read the FK column directly.
-    # ``source='forwarded_from.id'`` would crash with ``AttributeError``
-    # on legacy rows where the FK is NULL (DRF tries to dot-walk a None
-    # when the parent is unset).
     forwarded_from_id = serializers.IntegerField(read_only=True, allow_null=True)
     reactions = serializers.SerializerMethodField()
     my_reactions = serializers.SerializerMethodField()
+    # Phase 9 — delete + attachments + disappearing
+    is_deleted = serializers.SerializerMethodField()
+    deleted_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    deleted_by_id = serializers.IntegerField(read_only=True, allow_null=True)
+    deleted_by_username = serializers.SerializerMethodField()
+    document = serializers.CharField(read_only=True, allow_blank=True, default='')
+    document_name = serializers.CharField(read_only=True, allow_blank=True, default='')
+    has_document = serializers.SerializerMethodField()
+    location_lat = serializers.DecimalField(read_only=True, max_digits=9, decimal_places=6, allow_null=True)
+    location_lng = serializers.DecimalField(read_only=True, max_digits=9, decimal_places=6, allow_null=True)
+    location_name = serializers.CharField(read_only=True, allow_blank=True, default='')
+    has_location = serializers.SerializerMethodField()
+    attachment_kind = serializers.SerializerMethodField()  # 'image'|'audio'|'document'|'location'|None
 
     class Meta:
         model = Message
@@ -120,21 +120,17 @@ class MessageSerializer(serializers.ModelSerializer):
             'created_at',
             'forwarded_from_id', 'forward_sender_name',
             'reactions', 'my_reactions',
+            'is_deleted', 'deleted_at', 'deleted_by_id', 'deleted_by_username',
+            'document', 'document_name', 'has_document',
+            'location_lat', 'location_lng', 'location_name', 'has_location',
+            'attachment_kind',
+            'is_ephemeral', 'expires_at',
         ]
 
     def get_reactions(self, obj):
-        # ``MessageReaction`` rows are pushed onto the message via
-        # ``.reactions`` (a reverse FK). For a thread history of 100
-        # messages that would be 100 extra SELECTs. ``get_reactions_map``
-        # on the parent view/consumer pre-aggregates the same rows once
-        # via ``Message.objects.prefetch_related('reactions')`` and
-        # attaches the result on ``self.context`` so we can reuse it
-        # here without a per-row query.
         cached = (self.context or {}).get('reactions_by_message', {}) or {}
         rows = cached.get(obj.id)
         if rows is None:
-            # Fallback for ad-hoc serialization outside the chat list:
-            # one query for this message only, not for the whole list.
             rows = list(obj.reactions.values('emoji', 'user_id'))
         grouped = {}
         for r in rows:
@@ -152,31 +148,113 @@ class MessageSerializer(serializers.ModelSerializer):
             return cached[obj.id]
         return list(obj.reactions.filter(user=request.user).values_list('emoji', flat=True))
 
+    def get_reply_to_snippet(self, obj):
+        if obj.reply_to_id is None:
+            return ''
+        if getattr(obj.reply_to, 'deleted_at', None):
+            return ''
+        c = obj.reply_to.content or ''
+        return (c[:80] + '…') if len(c) > 80 else c
+
+    def get_reply_to_sender(self, obj):
+        if obj.reply_to_id is None:
+            return ''
+        if getattr(obj.reply_to, 'deleted_at', None):
+            return ''
+        return obj.reply_to.sender.username if obj.reply_to.sender_id else ''
+
+    def get_is_deleted(self, obj):
+        return obj.deleted_at is not None
+
+    def get_deleted_by_username(self, obj):
+        if not obj.deleted_by_id:
+            return ''
+        return obj.deleted_by.username if obj.deleted_by else ''
+
+    def get_has_document(self, obj):
+        return bool(obj.document)
+
+    def get_has_location(self, obj):
+        return obj.location_lat is not None and obj.location_lng is not None
+
+    def get_attachment_kind(self, obj):
+        if obj.image:
+            return 'image'
+        if obj.audio:
+            return 'audio'
+        if obj.document:
+            return 'document'
+        if obj.location_lat is not None and obj.location_lng is not None:
+            return 'location'
+        return None
+
 
 class ChatThreadSerializer(serializers.ModelSerializer):
     participants = UserMiniSerializer(many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
+    # Phase 9 — per-user prefs + group fields + dynamic is_request
+    is_pinned = serializers.SerializerMethodField()
+    is_archived = serializers.SerializerMethodField()
+    is_muted = serializers.SerializerMethodField()
+    is_request = serializers.SerializerMethodField()
+    is_group = serializers.BooleanField(read_only=True)
+    name = serializers.CharField(read_only=True, allow_blank=True, default='')
 
     class Meta:
         model = ChatThread
         fields = ['id', 'participants', 'created_at', 'updated_at',
-                  'last_message', 'unread_count']
+                  'last_message', 'unread_count',
+                  'is_pinned', 'is_archived', 'is_muted', 'is_request',
+                  'is_group', 'name']
+
+    def _settings_for(self, obj):
+        ctx_map = (self.context or {}).get('thread_settings_map') or {}
+        if obj.id in ctx_map:
+            return ctx_map[obj.id]
+        try:
+            return obj.settings.get(user=self.context['request'].user)
+        except Exception:
+            return None
+
+    def get_is_pinned(self, obj):
+        s = self._settings_for(obj)
+        return bool(s and s.is_pinned)
+
+    def get_is_archived(self, obj):
+        s = self._settings_for(obj)
+        return bool(s and s.is_archived)
+
+    def get_is_muted(self, obj):
+        s = self._settings_for(obj)
+        if not s or not s.muted_until:
+            return False
+        return s.muted_until > timezone.now()
+
+    def get_is_request(self, obj):
+        """Dynamic — never a column. A thread flips into request state when
+        the caller has unread messages AND has not yet sent any. Once they
+        reply, the serializer flips back to ``is_request=False``.
+        Explicit ``UserThreadSetting.is_request_ignored`` also suppresses."""
+        s = self._settings_for(obj)
+        if s and s.is_request_ignored:
+            return False
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        ever_sent = obj.messages.filter(sender=request.user).exists()
+        if ever_sent:
+            return False
+        cached = getattr(obj, '_unread_inbound_count', None)
+        if cached is not None:
+            return cached > 0
+        return obj.messages.filter(is_read=False).exclude(sender=request.user).exists()
 
     def get_last_message(self, obj):
-        # Prefer the prefetched "real last" cached by ChatThreadViewSet.list
-        # (zero extra queries). Falls back to a single SELECT when the
-        # serializer is used outside the list endpoint (single-resource
-        # reads, ad-hoc serialization, test fixtures).
         cached = getattr(obj, 'real_last_message', None)
         last = cached if cached is not None else obj.messages.order_by('-created_at').first()
         if not last:
             return None
-        # Aggregate reactions for this single message so the nested
-        # MessageSerializer skips its per-row fallback SELECT. This
-        # closes the N+1 cascade that ``/api/chat/threads/`` previously
-        # surfaced (each thread's last_message serializer re-fetched
-        # its own reactions in isolation).
         request = self.context.get('request')
         request_user = getattr(request, 'user', None) if request else None
         rxn_ctx = _build_reactions_context([last], request_user)
@@ -185,5 +263,41 @@ class ChatThreadSerializer(serializers.ModelSerializer):
     def get_unread_count(self, obj):
         request = self.context.get('request')
         if request and hasattr(request, 'user'):
+            cached = getattr(obj, '_unread_inbound_count', None)
+            if cached is not None:
+                return cached
             return obj.messages.filter(is_read=False).exclude(sender=request.user).count()
         return 0
+
+
+class CallLogSerializer(serializers.ModelSerializer):
+    caller_username = serializers.CharField(source='caller.username', read_only=True)
+    callee_username = serializers.CharField(source='callee.username', read_only=True)
+    caller_avatar = serializers.SerializerMethodField()
+    callee_avatar = serializers.SerializerMethodField()
+    # The FE (CallHistoryPanel.jsx + kot3chat websocket envelope) talks
+    # ``call_type`` / ``duration_seconds`` but ``part4.CallLog`` stores
+    # them as ``kind`` / ``duration`` with enums. We expose BOTH the
+    # legacy names (read-only aliases via ``source=``) and the canonical
+    # part4 names so an incremental FE migration never breaks.
+    call_type = serializers.CharField(source='kind', read_only=True)
+    duration_seconds = serializers.IntegerField(source='duration', read_only=True, default=0)
+
+    class Meta:
+        model = CallLog
+        fields = [
+            'id', 'caller', 'caller_username', 'caller_avatar',
+            'callee', 'callee_username', 'callee_avatar',
+            'thread', 'call_type', 'kind', 'status',
+            'started_at', 'ended_at', 'duration', 'duration_seconds',
+        ]
+
+    def get_caller_avatar(self, obj):
+        if hasattr(obj.caller, 'profile') and obj.caller.profile.avatar:
+            return obj.caller.profile.avatar
+        return None
+
+    def get_callee_avatar(self, obj):
+        if hasattr(obj.callee, 'profile') and obj.callee.profile.avatar:
+            return obj.callee.profile.avatar
+        return None

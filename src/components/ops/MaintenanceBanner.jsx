@@ -88,6 +88,17 @@ export default function MaintenanceBanner({
     return () => clearInterval(timerRef.current);
   }, [fetchState, pollInterval]);
 
+  // In-session X-Maintenance header hint (set by api.js interceptor
+  // on every read pass-through during a read_only window). The 30s
+  // poll above is the source of truth, but the event-driven refetch
+  // lets the banner light up within ~one request round-trip after
+  // the server-side toggle, instead of waiting up to 30s.
+  useEffect(() => {
+    const onHint = () => { fetchState(); };
+    window.addEventListener('devrose:server:maintenance', onHint);
+    return () => window.removeEventListener('devrose:server:maintenance', onHint);
+  }, [fetchState]);
+
   // When the window ends, hide the banner.
   useEffect(() => {
     if (!state || !state.ends_at) return;

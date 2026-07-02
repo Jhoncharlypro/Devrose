@@ -1,7 +1,11 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
 import App from './App.jsx'
 import './styles/index.css'
+import './styles/atelier.css'
+import './styles/kot3-profile.css'
+import './styles/kot3-privacy-space.css'
 
 // Class-based error boundary — React 18 still requires a class for
 // ``getDerivedStateFromError`` (no hook equivalent yet). Catches any
@@ -163,9 +167,11 @@ if (rootElem) {
   try {
     ReactDOM.createRoot(rootElem).render(
       <React.StrictMode>
-        <ErrorBoundary>
+      <ErrorBoundary>
+        <BrowserRouter>
           <App />
-        </ErrorBoundary>
+        </BrowserRouter>
+      </ErrorBoundary>
       </React.StrictMode>,
     )
     console.log('React Render called');

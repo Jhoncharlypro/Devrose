@@ -1,0 +1,396 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   KOT3 PROFILE — Single-page privacy & preview console
+   Full-screen z-5000 overlay. Reuses .kot3-profile-page styles for the
+   preview (Kot3 chat visual language). Adds persona toggle + privacy
+   panel + dark-mode aware.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --kot3prof-bg: #ffffff;
+  --kot3prof-text: #1a1a2e;
+  --kot3prof-text-dim: rgba(26, 26, 46, 0.6);
+  --kot3prof-border: rgba(26, 26, 46, 0.1);
+  --kot3prof-accent: #0084ff;
+  --kot3prof-accent-2: #e91e63;
+  --kot3prof-pill-bg: rgba(0, 132, 255, 0.08);
+  --kot3prof-pill-bg-active: linear-gradient(135deg, #0084ff, #e91e63);
+}
+
+body.dark-mode {
+  --kot3prof-bg: #0f1117;
+  --kot3prof-text: #e6e6f0;
+  --kot3prof-text-dim: rgba(230, 230, 240, 0.55);
+  --kot3prof-border: rgba(255, 255, 255, 0.08);
+  --kot3prof-pill-bg: rgba(0, 132, 255, 0.15);
+}
+
+body.kot3prof-open { overflow: hidden; }
+
+/* ── Shell ──────────────────────────────────────────────────── */
+.kot3prof-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  background: var(--kot3prof-bg);
+  color: var(--kot3prof-text);
+  display: flex;
+  flex-direction: column;
+  animation: kot3prof-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  overflow: hidden;
+  font-family: 'Poppins', system-ui, sans-serif;
+}
+
+@keyframes kot3prof-in {
+  from { opacity: 0; transform: translateY(12px); filter: blur(4px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
+}
+
+/* ── Topbar ─────────────────────────────────────────────────── */
+.kot3prof-topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--kot3prof-border);
+  background: linear-gradient(180deg,
+    rgba(0, 132, 255, 0.04),
+    transparent);
+  flex-shrink: 0;
+}
+.kot3prof-back {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid var(--kot3prof-border);
+  color: var(--kot3prof-text);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit; font-size: 0.85rem; font-weight: 600;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.kot3prof-back:hover {
+  background: rgba(0, 132, 255, 0.08);
+  border-color: var(--kot3prof-accent);
+  color: var(--kot3prof-accent);
+}
+.kot3prof-back i { font-size: 0.85rem; }
+.kot3prof-topbar-title {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.kot3prof-topbar-title h2 {
+  margin: 0; font-size: 1.05rem; font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.kot3prof-topbar-title span {
+  font-size: 0.74rem;
+  color: var(--kot3prof-text-dim);
+}
+.kot3prof-topbar-spacer { width: 90px; flex-shrink: 0; }
+
+/* ── "Controls" button — hands off to the Privacy Space overlay (added
+   in the Privacy Space refactor). Styled to match the topbar scale so
+   the close / controls / share buttons visually balance. Disabled
+   placeholder for hosts that didn't pass the onOpenPrivacy callback. */
+.kot3prof-controls-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.22), rgba(0, 231, 255, 0.12));
+  border: 1px solid rgba(108, 92, 231, 0.45);
+  color: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit; font-size: 0.82rem; font-weight: 700;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(108, 92, 231, 0.25);
+  transition: all 0.2s ease;
+}
+.kot3prof-controls-btn:hover {
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.40), rgba(0, 231, 255, 0.22));
+  border-color: var(--kot3prof-accent, #0084ff);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(108, 92, 231, 0.40);
+}
+.kot3prof-controls-btn:active { transform: scale(0.98); }
+.kot3prof-controls-btn:disabled,
+.kot3prof-controls-btn.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+.kot3prof-controls-btn i { font-size: 0.85rem; }
+
+/* ── Persona toggle (sticky under topbar) ───────────────────── */
+.kot3prof-persona-wrap {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--kot3prof-border);
+  background: var(--kot3prof-bg);
+  position: sticky; top: 0;
+  z-index: 5;
+  flex-shrink: 0;
+}
+.kot3prof-persona {
+  display: flex; align-items: center; gap: 14px;
+  flex-wrap: wrap;
+}
+.kot3prof-persona-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.78rem;
+  color: var(--kot3prof-text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.kot3prof-persona-label i { color: var(--kot3prof-accent); }
+.kot3prof-persona-pills {
+  display: flex; gap: 6px;
+  flex: 1;
+}
+.kot3prof-persona-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px;
+  background: var(--kot3prof-pill-bg);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--kot3prof-text);
+  font: inherit; font-size: 0.78rem; font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.kot3prof-persona-pill:hover { transform: translateY(-1px); }
+.kot3prof-persona-pill.is-active {
+  background: var(--kot3prof-pill-bg-active);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0, 132, 255, 0.3);
+  border-color: transparent;
+}
+.kot3prof-persona-pill i { font-size: 0.78rem; }
+
+/* ── Main split: preview (left) + privacy (right) ───────────── */
+.kot3prof-main {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 0;
+  background: var(--kot3prof-bg);
+}
+.kot3prof-main::-webkit-scrollbar { width: 8px; }
+.kot3prof-main::-webkit-scrollbar-thumb {
+  background: rgba(0, 132, 255, 0.3); border-radius: 4px;
+}
+
+/* Preview side */
+.kot3prof-preview {
+  position: relative;
+  background: linear-gradient(180deg,
+    rgba(0, 132, 255, 0.04),
+    transparent);
+  border-right: 1px solid var(--kot3prof-border);
+  padding-bottom: 32px;
+}
+.kot3prof-preview .kot3-profile-page {
+  background: transparent;
+  padding: 0 8px;
+}
+
+.kot3prof-loading {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 80px 20px;
+  color: var(--kot3prof-text-dim);
+  font-size: 0.9rem;
+}
+.kot3prof-loading i { font-size: 1.6rem; color: var(--kot3prof-accent); }
+
+/* "Self view" floating badge over the preview */
+.kot3prof-self-hint {
+  position: sticky; top: 12px;
+  margin: 12px auto;
+  display: flex; justify-content: center;
+  z-index: 2;
+}
+.kot3prof-self-hint span {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  background: rgba(0, 132, 255, 0.12);
+  border: 1px solid rgba(0, 132, 255, 0.3);
+  color: var(--kot3prof-accent);
+  border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  backdrop-filter: blur(8px);
+}
+
+/* "Blocked / private" banner — shown when the persona can't see the
+   profile at all (e.g. private profile viewed by a stranger). */
+.kot3prof-blocked-hint {
+  position: sticky; top: 12px;
+  margin: 12px auto;
+  display: flex; justify-content: center;
+  z-index: 2;
+}
+.kot3prof-blocked-hint span {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px;
+  background: rgba(233, 30, 99, 0.12);
+  border: 1px solid rgba(233, 30, 99, 0.35);
+  color: #e91e63;
+  border-radius: 999px;
+  font-size: 0.78rem; font-weight: 700;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(8px);
+}
+body.dark-mode .kot3prof-blocked-hint span {
+  color: #ff5a8a;
+}
+
+/* Privacy side */
+.kot3prof-privacy {
+  padding: 24px 22px;
+  background: var(--kot3prof-bg);
+  display: flex; flex-direction: column; gap: 14px;
+  padding-bottom: 32px;
+}
+.kot3prof-section-title {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 6px;
+  font-size: 0.92rem; font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kot3prof-accent);
+}
+.kot3prof-section-title i { opacity: 0.9; }
+
+.kot3prof-privacy-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: var(--kot3prof-pill-bg);
+  border: 1px solid var(--kot3prof-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.kot3prof-privacy-row:hover {
+  border-color: var(--kot3prof-accent);
+  background: rgba(0, 132, 255, 0.05);
+}
+.kot3prof-privacy-label {
+  display: flex; align-items: flex-start; gap: 10px;
+  flex: 1; min-width: 0;
+}
+.kot3prof-privacy-label > i {
+  flex: 0 0 28px; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--kot3prof-pill-bg);
+  color: var(--kot3prof-accent);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+.kot3prof-privacy-label strong {
+  display: block; font-size: 0.85rem; font-weight: 700;
+  color: var(--kot3prof-text);
+}
+.kot3prof-privacy-label span {
+  display: block; font-size: 0.72rem;
+  color: var(--kot3prof-text-dim);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.kot3prof-select {
+  padding: 6px 10px;
+  background: var(--kot3prof-bg);
+  border: 1px solid var(--kot3prof-border);
+  color: var(--kot3prof-text);
+  border-radius: 6px;
+  font: inherit; font-size: 0.78rem; font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+  flex-shrink: 0;
+  min-width: 110px;
+}
+.kot3prof-select:focus { border-color: var(--kot3prof-accent); }
+
+.kot3prof-switch {
+  position: relative; display: inline-block;
+  width: 42px; height: 24px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.kot3prof-switch input { opacity: 0; width: 0; height: 0; }
+.kot3prof-switch-slider {
+  position: absolute; inset: 0;
+  background: var(--kot3prof-border);
+  border-radius: 24px;
+  transition: 0.2s;
+  cursor: pointer;
+}
+.kot3prof-switch-slider::before {
+  position: absolute; content: '';
+  height: 18px; width: 18px;
+  left: 3px; bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.kot3prof-switch input:checked + .kot3prof-switch-slider {
+  background: linear-gradient(135deg, #0084ff, #e91e63);
+}
+.kot3prof-switch input:checked + .kot3prof-switch-slider::before {
+  transform: translateX(18px);
+}
+
+.kot3prof-save {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 6px;
+  padding: 12px 18px;
+  background: linear-gradient(135deg, #0084ff, #e91e63);
+  color: #fff;
+  border: 0;
+  border-radius: 10px;
+  font: inherit; font-size: 0.85rem; font-weight: 800;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 132, 255, 0.3);
+  transition: transform 0.15s, box-shadow 0.2s;
+}
+.kot3prof-save:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 132, 255, 0.4);
+}
+.kot3prof-save:active { transform: scale(0.98); }
+.kot3prof-save:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+.kot3prof-save i { font-size: 0.85rem; }
+
+/* ── Footer ─────────────────────────────────────────────────── */
+.kot3prof-footer {
+  padding: 16px 20px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--kot3prof-border);
+  background: var(--kot3prof-bg);
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--kot3prof-text-dim);
+  flex-shrink: 0;
+}
+
+/* ── Mobile ─────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .kot3prof-topbar { padding: 12px 14px; }
+  .kot3prof-topbar-title h2 { font-size: 0.95rem; }
+  .kot3prof-topbar-title span { display: none; }
+  .kot3prof-topbar-spacer { width: 0; }
+  .kot3prof-persona-wrap { padding: 10px 14px; }
+  .kot3prof-persona { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .kot3prof-persona-pills { width: 100%; }
+  .kot3prof-persona-pill { flex: 1; justify-content: center; }
+  .kot3prof-main { grid-template-columns: 1fr; }
+  .kot3prof-preview { border-right: 0; border-bottom: 1px solid var(--kot3prof-border); max-height: 50vh; }
+  .kot3prof-privacy { max-height: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kot3prof-shell { animation: none; }
+}

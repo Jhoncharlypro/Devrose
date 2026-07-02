@@ -55,7 +55,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api, { chatService } from '../services/api';
-import { buildChatSocketUrl, sameId, isTempId } from '../components/kot3chat/constants';
+import { buildChatSocketUrl, sameId, isTempId } from '../components/kot3chat/params';
 import {
   playSendBeep,
   playReceiveBeep,
@@ -69,6 +69,7 @@ import {
  * @param {Function} opts.onMessage        — (msg) => void  new-message handler.
  * @param {Function} opts.onThreadBump     — ({threadId, message}) => void
  * @param {Function} opts.onMessageUpdated — ({messageId, content, is_edited, edited_at}) => void
+ * @param {Function} [opts.onMessageDeleted] — ({threadId, messageId, deletedById, deletedAt}) => void
  * @param {Function} opts.onMessageDelivered — ({messageId}) => void
  * @param {Function} opts.onMessageRead   — ({messageIds, readerId, readerUsername}) => void
  * @param {Function} opts.onTyping         — ({threadId, username, isTyping}) => void
@@ -85,6 +86,17 @@ import {
  * @param {Function} opts.onConnected      — ({userId, username}) => void
  * @param {Function} [opts.onJoinedThread] — ({threadId}) => void
  * @param {Function} [opts.onLeftThread]   — () => void
+ * @param {Function} [opts.onPresenceSnapshot] — ({online, lastSeen}) => void
+ *                          Server-pushed full presence snapshot — lets
+ *                          the host reconcile its own userPresenceSnapshot
+ *                          (messenger list) on (re)connect, even before
+ *                          the user opens a thread.
+ * @param {Function} [opts.onThreadSettingUpdated] — ({threadId, userId, updates}) => void
+ *                          Server-pushed per-user thread prefs change
+ *                          (pin / archive / mute / request-ignore). Used
+ *                          for cross-device sync of THIS user's prefs;
+ *                          the originating device has already applied
+ *                          the optimistic update via REST/WS.
  * @param {Function} [opts.toast]          — (text, icon) => void  for UX messages
  * @param {string}    [opts.lang]          — 'ht' | 'en' | …     for toast localization
  */
@@ -95,6 +107,7 @@ export function useChatSocket(opts) {
     onMessage,
     onThreadBump,
     onMessageUpdated,
+    onMessageDeleted,
     onMessageDelivered,
     onMessageRead,
     onTyping,
@@ -111,6 +124,8 @@ export function useChatSocket(opts) {
     onConnected,
     onJoinedThread,
     onLeftThread,
+    onPresenceSnapshot,
+    onThreadSettingUpdated,
     toast,
     lang,
   } = opts || {};
@@ -133,6 +148,24 @@ export function useChatSocket(opts) {
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
   const activeThreadIdRef = useRef(null);
+  // Refs for optional callbacks so adding them to the connect
+  // useCallback deps doesn't cause a host that passes an inline
+  // (unmemoized) function to flap the WS. The ref is synced every
+  // render; the connect callback always reads the latest value via
+  // ``cbRef.current?.(...)`` and never re-creates on host re-render.
+  const onPresenceSnapshotRef = useRef(null);
+  // Same ref-pattern for the Phase 9 broadcasts. The hook's host can
+  // pass inline (unmemoized) callbacks without flapping the WS — the
+  // ref is read inside the ``case`` branches below.
+  const onMessageDeletedRef = useRef(null);
+  const onThreadSettingUpdatedRef = useRef(null);
+  // Note: we don't gate this on a ``useEffect`` because the read
+  // happens during ``connect``'s body, which already runs at most
+  // once per (re)connect — the ref is current for the lifetime of
+  // the socket.
+  onPresenceSnapshotRef.current = onPresenceSnapshot;
+  onMessageDeletedRef.current = onMessageDeleted;
+  onThreadSettingUpdatedRef.current = onThreadSettingUpdated;
 
   // Persist the active thread so any auto-reconnect can rejoin the room.
   useEffect(() => {
@@ -206,6 +239,12 @@ export function useChatSocket(opts) {
       if (activeThreadIdRef.current) {
         ws.send(JSON.stringify({ type: 'join_thread', thread_id: activeThreadIdRef.current }));
       }
+      // Request a fresh presence snapshot so the localStorage
+      // cache (which may be hours/days stale) is reconciled with
+      // the live server view. Critical for the "stale online dot"
+      // bug — without this the green dot shows users who logged
+      // out days ago.
+      try { ws.send(JSON.stringify({ type: 'get_presence_snapshot' })); } catch (_) { /* ignore */ }
       onConnected?.({ userId: user.id, username: user.username });
     };
 
@@ -265,6 +304,20 @@ export function useChatSocket(opts) {
             edited_at: data.edited_at,
           });
           break;
+        case 'message_deleted':
+          // Phase 9 — soft-delete broadcast. Surface to the host so
+          // it can collapse the bubble to a tombstone without a REST
+          // roundtrip. Idempotent on the host side: if the host's
+          // local state already records this message as deleted
+          // (e.g. REST already returned + we received the WS echo),
+          // the host's reducer short-circuits.
+          onMessageDeletedRef.current?.({
+            threadId: data.thread_id,
+            messageId: data.message_id,
+            deletedById: data.deleted_by_id,
+            deletedAt: data.deleted_at,
+          });
+          break;
         case 'message_delivered':
           onMessageDelivered?.({ messageId: data.message_id });
           break;
@@ -303,11 +356,24 @@ export function useChatSocket(opts) {
               next[data.user_id] = { username: data.username, status: 'online', last_seen: null };
               onPresenceOnline?.({ userId: data.user_id, username: data.username });
             } else {
-              next[data.user_id] = {
-                username: data.username,
-                status: 'offline',
-                last_seen: data.last_seen || new Date().toISOString(),
-              };
+              // OFFLINE event. We keep the row in the map for 30
+              // days so the "last seen X m ago" badge in the
+              // sidebar stays accurate, but entries older than that
+              // are removed entirely so localStorage doesn't
+              // accumulate a year of stale names. The next
+              // presence_snapshot from the server will rewrite the
+              // map fresh on the next (re)connect.
+              const ls = data.last_seen ? new Date(data.last_seen) : new Date();
+              const stale = (Date.now() - ls.getTime()) > 30 * 24 * 60 * 60 * 1000;
+              if (stale) {
+                delete next[data.user_id];
+              } else {
+                next[data.user_id] = {
+                  username: data.username,
+                  status: 'offline',
+                  last_seen: data.last_seen || new Date().toISOString(),
+                };
+              }
               setLastSeenById(prev => ({ ...prev, [data.user_id]: data.last_seen || null }));
               onPresenceOffline?.({
                 userId: data.user_id,
@@ -319,6 +385,48 @@ export function useChatSocket(opts) {
           });
           break;
         }
+        case 'presence_snapshot': {
+          // Server-sent fresh snapshot. REPLACE the local cache
+          // (instead of merging) so users who actually went offline
+          // drop from the map (and from localStorage) on every
+          // (re)connect. Without this, a user who closes their tab
+          // while the server stays up keeps showing as online
+          // forever — the legacy "stale online dot" bug.
+          const fresh = data.online || {};
+          const next = {};
+          const lastSeenPatch = {};
+          Object.entries(fresh).forEach(([uid, meta]) => {
+            next[uid] = {
+              username: meta.username,
+              status: 'online',
+              last_seen: meta.last_seen || null,
+            };
+            if (meta.last_seen) lastSeenPatch[uid] = meta.last_seen;
+          });
+          setOnlineUsers(next);
+          setLastSeenById(prev => (
+            Object.keys(lastSeenPatch).length
+              ? { ...prev, ...lastSeenPatch }
+              : prev
+          ));
+          // Surface to the host so Kot3Chat's userPresenceSnapshot
+          // (messenger list last-seen badges) is also reconciled.
+          // Read via the ref so an unmemoized host callback doesn't
+          // re-create ``connect`` (and flap the WS).
+          onPresenceSnapshotRef.current?.({ online: next, lastSeen: lastSeenPatch });
+          break;
+        }
+        case 'thread_setting_updated':
+          // Phase 9 — per-user thread prefs broadcast. BE targets
+          // ``kot3_user_{id}`` (not the thread room) so this is
+          // cross-device sync for THE SAME user. Read via ref to
+          // avoid flapping the WS.
+          onThreadSettingUpdatedRef.current?.({
+            threadId: data.thread_id,
+            userId: data.user_id,
+            updates: data.updates || {},
+          });
+          break;
         case 'new_story':
           onStory?.(data.story);
           break;
@@ -377,6 +485,20 @@ export function useChatSocket(opts) {
       clearTimeout(reconnectTimerRef.current);
     };
   }, [user, connect]);
+
+  // 60s heartbeat. Keeps the server-side ``last_seen`` fresh AND
+  // surfaces fresh presence snapshots so a long-lived tab doesn't
+  // drift from server truth. Sent only while the socket is OPEN.
+  useEffect(() => {
+    if (!wsConnected) return undefined;
+    const id = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && wsReadyRef.current) {
+        try { ws.send(JSON.stringify({ type: 'heartbeat' })); } catch (_) { /* ignore */ }
+      }
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [wsConnected]);
 
   // ─────────── send helpers (return true on success, false if not open) ───────────
   const safeSend = useCallback((payload) => {
@@ -514,6 +636,7 @@ export function useChatSocket(opts) {
     sendCallDeclined,
     sendWebRtcSignal,
     sendPublishStory,
+    onPresenceSnapshot,
     markOnline,
     markOffline,
     reset,

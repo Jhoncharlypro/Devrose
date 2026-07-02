@@ -104,3 +104,6 @@ pnpm-debug.log*
 *.tgz
 .tmp/
 .temp/
+
+# Redis dump (development artifact — never commit)
+dump.rdb
